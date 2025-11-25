@@ -1,11 +1,9 @@
-from dotenv import load_dotenv
+# config.py
 import os
 
-load_dotenv()
-
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-if TOKEN is None:
-    raise ValueError("❌ BOT_TOKEN aniqlanmagan! .env faylni tekshiring.")
+TOKEN = os.getenv("BOT_TOKEN")  # Telegram bot token
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # Sizning ID
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:parol@host:port/dbname"
+)
