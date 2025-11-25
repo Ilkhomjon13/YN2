@@ -20,8 +20,8 @@ services:
     depends_on:
       - db
     environment:
-      TOKEN: "YOUR_BOT_TOKEN_HERE"
-      DATABASE_URL: "postgresql://postgres:secret123@db:5432/survey_db"
+      TOKEN: "7196045219:AAFfbeIZQXKAb_cgAC2cnbdMY__L0Iakcrg"
+      DATABASE_URL: "postgresql://postgres:IJgDkPQTgFQTJqTomCNezddMsHJJPDmm@postgres.railway.internal:5432/railway"
       ADMIN_ID: "YOUR_ADMIN_ID_HERE"
     restart: always
 
