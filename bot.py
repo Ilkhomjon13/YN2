@@ -1,13 +1,10 @@
 import logging
 import asyncio
-from datetime import datetime
 import os
-
+import asyncpg
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-import asyncpg
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,13 +15,12 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ====================== DATABASE POOL ======================
+# ====================== DATABASE ======================
 pool: asyncpg.pool.Pool = None
 
 async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-
     async with pool.acquire() as conn:
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
@@ -51,7 +47,6 @@ async def setup_db():
         """)
 
 # ====================== HELPERS ======================
-
 async def get_surveys():
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM surveys WHERE active=true")
@@ -65,10 +60,7 @@ async def get_survey(survey_id: int):
 
 async def user_has_voted(survey_id: int, user_id: int) -> bool:
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT 1 FROM voted_users WHERE survey_id=$1 AND user_id=$2",
-            survey_id, user_id
-        )
+        row = await conn.fetchrow("SELECT 1 FROM voted_users WHERE survey_id=$1 AND user_id=$2", survey_id, user_id)
         return row is not None
 
 async def add_vote(survey_id: int, candidate_id: int, user_id: int):
@@ -87,8 +79,7 @@ async def check_channels(user_id: int, channels: list):
             return False
     return True
 
-# ====================== KEYBOARD ======================
-
+# ====================== KEYBOARDS ======================
 def candidates_keyboard(candidates):
     buttons = [
         [InlineKeyboardButton(f"{cand['name']} ⭐ {cand['votes']}", callback_data=f"vote_{cand['id']}")]
@@ -96,8 +87,14 @@ def candidates_keyboard(candidates):
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ====================== HANDLERS ======================
+def admin_main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("➕ So‘rovnoma yaratish", callback_data="admin_create")],
+        [InlineKeyboardButton("📋 So‘rovnomalarni ko‘rish", callback_data="admin_list")],
+        [InlineKeyboardButton("📊 Natijalarni ko‘rish", callback_data="admin_results")]
+    ])
 
+# ====================== USER HANDLERS ======================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     surveys = await get_surveys()
@@ -156,8 +153,51 @@ async def vote_callback(query: types.CallbackQuery):
     await query.message.edit_reply_markup(kb)
     await query.answer("✔ Ovoz berildi!")
 
-# ====================== RUN ======================
+# ====================== ADMIN HANDLERS ======================
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Siz admin emassiz!")
+        return
+    await message.answer("👨‍💼 Admin panel:", reply_markup=admin_main_keyboard())
 
+@dp.callback_query(lambda c: c.data == "admin_create")
+async def admin_create(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return
+    await query.message.answer("📝 So‘rovnoma nomini yuboring:")
+
+    @dp.message()
+    async def get_title(message: types.Message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        async with pool.acquire() as conn:
+            survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", message.text)
+        await message.answer(f"✅ So‘rovnoma yaratildi (ID: {survey['id']})")
+
+@dp.callback_query(lambda c: c.data == "admin_list")
+async def admin_list(query: types.CallbackQuery):
+    surveys = await get_surveys()
+    if not surveys:
+        await query.message.answer("❌ Aktiv so‘rovnoma yo‘q.")
+        return
+    buttons = [[InlineKeyboardButton(f"{s['title']}", callback_data=f"admin_open_{s['id']}")] for s in surveys]
+    await query.message.answer("📋 So‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(lambda c: c.data == "admin_results")
+async def admin_results(query: types.CallbackQuery):
+    surveys = await get_surveys()
+    if not surveys:
+        await query.message.answer("❌ Aktiv so‘rovnoma yo‘q.")
+        return
+    for s in surveys:
+        _, candidates, _ = await get_survey(s['id'])
+        text = f"🗳 {s['title']}\n"
+        for c in candidates:
+            text += f"- {c['name']} ⭐ {c['votes']}\n"
+        await query.message.answer(text)
+
+# ====================== RUN ======================
 async def main():
     await setup_db()
     await dp.start_polling(bot)
