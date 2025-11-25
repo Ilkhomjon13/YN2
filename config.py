@@ -1,6 +1,8 @@
+from dotenv import load_dotenv
 import os
 
-TOKEN = os.getenv("7196045219:AAFfbeIZQXKAb_cgAC2cnbdMY__L0Iakcrg")
-ADMIN_ID = int(os.getenv("1262207928", "0"))
+load_dotenv()  # .env faylni o'qish
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:jnbJgLWFGsagpbhiQqMVWkXgNitEtmSz@postgres.railway.internal:5432/railway")
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DATABASE_URL = os.getenv("DATABASE_URL")
