@@ -107,12 +107,18 @@ async def add_vote(survey_id: int, candidate_id: int, user_id: int):
             await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
 
 # ====================== ADMIN WELCOME (reply keyboard doimiy) ======================
-@dp.message(F.text)
-async def ensure_admin_keyboard(message: types.Message):
-    # Adminga har qanday xabar kelganda klaviaturani ko‘rsatib turamiz
+@dp.message(F.text == "/start")
+async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        # Admin panel tugmalari doimiy ko‘rinib turadi
         await message.answer("👨‍💼 Admin panel:", reply_markup=admin_keyboard())
+        return
+    # foydalanuvchilar uchun ro‘yxat
+    surveys = await get_surveys()
+    if not surveys:
+        await message.answer("Hozircha aktiv so‘rovnoma yo‘q.")
+        return
+    buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
+    await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # ====================== ADMIN PANEL (functional) ======================
 @dp.message(F.text == "➕ So‘rovnoma yaratish")
