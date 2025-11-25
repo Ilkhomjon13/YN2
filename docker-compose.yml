@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: survey_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret123
+      POSTGRES_DB: survey_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    container_name: survey_bot
+    depends_on:
+      - db
+    environment:
+      TOKEN: "YOUR_BOT_TOKEN_HERE"
+      DATABASE_URL: "postgresql://postgres:secret123@db:5432/survey_db"
+      ADMIN_ID: "YOUR_ADMIN_ID_HERE"
+    restart: always
+
+volumes:
+  postgres_data:
