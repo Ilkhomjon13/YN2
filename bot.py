@@ -2,7 +2,7 @@ import logging
 import asyncio
 import os
 import asyncpg
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -58,102 +58,21 @@ async def get_survey(survey_id: int):
         channels = await conn.fetch("SELECT channel FROM required_channels WHERE survey_id=$1", survey_id)
         return survey, candidates, [ch['channel'] for ch in channels]
 
-async def user_has_voted(survey_id: int, user_id: int) -> bool:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM voted_users WHERE survey_id=$1 AND user_id=$2", survey_id, user_id)
-        return row is not None
-
-async def add_vote(survey_id: int, candidate_id: int, user_id: int):
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("UPDATE candidates SET votes=votes+1 WHERE id=$1", candidate_id)
-            await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
-
-async def check_channels(user_id: int, channels: list):
-    for ch in channels:
-        try:
-            member = await bot.get_chat_member(ch, user_id)
-            if member.status in ["left", "kicked"]:
-                return False
-        except Exception:
-            return False
-    return True
-
 # ====================== KEYBOARDS ======================
-def candidates_keyboard(candidates):
-    buttons = [
-        [InlineKeyboardButton(f"{cand['name']} ⭐ {cand['votes']}", callback_data=f"vote_{cand['id']}")]
-        for cand in candidates
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 def admin_main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("➕ So‘rovnoma yaratish", callback_data="admin_create")],
-        [InlineKeyboardButton("📋 So‘rovnomalarni ko‘rish", callback_data="admin_list")],
-        [InlineKeyboardButton("📊 Natijalarni ko‘rish", callback_data="admin_results")]
+        [InlineKeyboardButton(text="➕ So‘rovnoma yaratish", callback_data="admin_create")],
+        [InlineKeyboardButton(text="📋 So‘rovnomalarni ko‘rish", callback_data="admin_list")],
+        [InlineKeyboardButton(text="📊 Natijalarni ko‘rish", callback_data="admin_results")]
     ])
 
-# ====================== USER HANDLERS ======================
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    surveys = await get_surveys()
-    if not surveys:
-        await message.answer("Hozircha aktiv so‘rovnoma yo‘q.")
-        return
-    buttons = [[InlineKeyboardButton(s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
-    await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+def candidates_keyboard(candidates):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{c['name']} ⭐ {c['votes']}", callback_data=f"vote_{c['id']}")]
+        for c in candidates
+    ])
 
-@dp.callback_query(lambda c: c.data.startswith("open_"))
-async def open_survey_callback(query: types.CallbackQuery):
-    survey_id = int(query.data.replace("open_", ""))
-    survey, candidates, channels = await get_survey(survey_id)
-    user_id = query.from_user.id
-
-    if not await check_channels(user_id, channels):
-        buttons = [[InlineKeyboardButton(f"📢 {ch} ga qo‘shilish", url=f"https://t.me/{ch[1:]}")] for ch in channels]
-        buttons.append([InlineKeyboardButton("✔ Tekshirish", callback_data=f"check_{survey_id}")])
-        await query.message.answer("❗ Ushbu so‘rovnomada qatnashish uchun kanallarga a’zo bo‘ling:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-        return
-
-    kb = candidates_keyboard(candidates)
-    if survey['image']:
-        await query.message.answer_photo(survey['image'], caption=survey['title'], reply_markup=kb)
-    else:
-        await query.message.answer(survey['title'], reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("check_"))
-async def check_callback(query: types.CallbackQuery):
-    survey_id = int(query.data.replace("check_", ""))
-    survey, candidates, channels = await get_survey(survey_id)
-    user_id = query.from_user.id
-
-    if not await check_channels(user_id, channels):
-        await query.answer("❗ Hali barcha kanallarga a’zo bo‘lmagansiz!", show_alert=True)
-        return
-
-    kb = candidates_keyboard(candidates)
-    await query.message.answer("🎉 Endi ovoz berishingiz mumkin!", reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data.startswith("vote_"))
-async def vote_callback(query: types.CallbackQuery):
-    candidate_id = int(query.data.replace("vote_", ""))
-    async with pool.acquire() as conn:
-        cand = await conn.fetchrow("SELECT * FROM candidates WHERE id=$1", candidate_id)
-        survey_id = cand['survey_id']
-
-    if await user_has_voted(survey_id, query.from_user.id):
-        await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
-        return
-
-    await add_vote(survey_id, candidate_id, query.from_user.id)
-    _, candidates, _ = await get_survey(survey_id)
-    kb = candidates_keyboard(candidates)
-
-    await query.message.edit_reply_markup(kb)
-    await query.answer("✔ Ovoz berildi!")
-
-# ====================== ADMIN HANDLERS ======================
+# ====================== ADMIN PANEL ======================
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -161,7 +80,8 @@ async def admin_panel(message: types.Message):
         return
     await message.answer("👨‍💼 Admin panel:", reply_markup=admin_main_keyboard())
 
-@dp.callback_query(lambda c: c.data == "admin_create")
+# ➕ So‘rovnoma yaratish
+@dp.callback_query(F.data == "admin_create")
 async def admin_create(query: types.CallbackQuery):
     if query.from_user.id != ADMIN_ID:
         return
@@ -175,16 +95,18 @@ async def admin_create(query: types.CallbackQuery):
             survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", message.text)
         await message.answer(f"✅ So‘rovnoma yaratildi (ID: {survey['id']})")
 
-@dp.callback_query(lambda c: c.data == "admin_list")
+# 📋 So‘rovnomalarni ko‘rish
+@dp.callback_query(F.data == "admin_list")
 async def admin_list(query: types.CallbackQuery):
     surveys = await get_surveys()
     if not surveys:
         await query.message.answer("❌ Aktiv so‘rovnoma yo‘q.")
         return
-    buttons = [[InlineKeyboardButton(f"{s['title']}", callback_data=f"admin_open_{s['id']}")] for s in surveys]
+    buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"admin_open_{s['id']}")] for s in surveys]
     await query.message.answer("📋 So‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@dp.callback_query(lambda c: c.data == "admin_results")
+# 📊 Natijalarni ko‘rish
+@dp.callback_query(F.data == "admin_results")
 async def admin_results(query: types.CallbackQuery):
     surveys = await get_surveys()
     if not surveys:
