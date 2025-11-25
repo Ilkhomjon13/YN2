@@ -1,15 +1,19 @@
 import logging
 import asyncio
 from datetime import datetime
+import os
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import asyncpg
-from config import TOKEN, DATABASE_URL, ADMIN_ID
 
 logging.basicConfig(level=logging.INFO)
+
+TOKEN = os.getenv("TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -20,7 +24,7 @@ pool: asyncpg.pool.Pool = None
 async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    # Agar jadval hali yaratilmagan bo'lsa
+
     async with pool.acquire() as conn:
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
@@ -112,7 +116,7 @@ async def open_survey_callback(query: types.CallbackQuery):
     if not await check_channels(user_id, channels):
         buttons = [[InlineKeyboardButton(f"📢 {ch} ga qo‘shilish", url=f"https://t.me/{ch[1:]}")] for ch in channels]
         buttons.append([InlineKeyboardButton("✔ Tekshirish", callback_data=f"check_{survey_id}")])
-        await query.message.answer("❗ Ushbu so‘rovnomada qatnashish uchun kanallarga a’zo bo‘ling:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.answer("❗ Ushbu so‘rovnomada qatnashish uchun kanallarga a’zo bo‘ling:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         return
 
     kb = candidates_keyboard(candidates)
