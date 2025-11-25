@@ -4,28 +4,17 @@ import ssl
 from config import DATABASE_URL
 
 async def create_pool():
-    """
-    PostgreSQL bilan ulanishni yaratadi va pool qaytaradi.
-    SSL bilan ishlashni qo'llab-quvvatlaydi.
-    """
-    # SSL kontekstini yaratish
     ssl_context = ssl.create_default_context()
-    
-    # Pool yaratish
     pool = await asyncpg.create_pool(
         dsn=DATABASE_URL,
         ssl=ssl_context,
-        min_size=1,  # minimal ulanishlar soni
-        max_size=5   # maksimal ulanishlar soni
+        min_size=1,
+        max_size=5
     )
     return pool
 
 async def init_db(pool):
-    """
-    Bazani boshlang'ich sozlash (jadval yaratish va hokazo)
-    """
     async with pool.acquire() as conn:
-        # Jadval yaratish misoli
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
