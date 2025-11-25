@@ -1,0 +1,345 @@
+# ================================================
+#   SUPER VERSION — MULTI SURVEY + FORCED JOIN
+#   Admin: so‘rovnoma yaratadi + majburiy kanallar belgilaydi
+#   User: har bir so‘rovnomada mos kanallarga a'zo bo‘lishi shart
+# ================================================
+
+import json
+import os
+from datetime import datetime
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+
+TOKEN = "7196045219:AAFfbeIZQXKAb_cgAC2cnbdMY__L0Iakcrg"
+ADMIN_ID = 1262207928   # admin ID kiriting
+
+DATA_FILE = "data.json"
+
+# ===================== HELPERS =====================
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"surveys": {}, "counter": 0}
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+# ===================== CHART CREATION =====================
+
+def create_chart(survey_id, survey):
+    if not os.path.exists("charts"):
+        os.mkdir("charts")
+
+    names = list(survey["votes"].keys())
+    votes = list(survey["votes"].values())
+
+    plt.figure(figsize=(8, 5))
+    plt.bar(names, votes, color='royalblue')
+    plt.title(f"{survey['title']} – Ovozlar statistikasi")
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+
+    path = f"charts/survey_{survey_id}_chart.png"
+    plt.savefig(path)
+    plt.close()
+    return path
+
+
+def export_excel(survey_id, survey):
+    if not os.path.exists("exports"):
+        os.mkdir("exports")
+
+    df = pd.DataFrame({
+        "Nomzod": list(survey["votes"].keys()),
+        "Ovozlar": list(survey["votes"].values())
+    })
+
+    path = f"exports/survey_{survey_id}.xlsx"
+    df.to_excel(path, index=False)
+    return path
+
+
+# ===================== KEYBOARD =====================
+
+def get_candidate_buttons(survey):
+    buttons = []
+    for cand in survey["candidates"]:
+        c = survey["votes"][cand]
+        text = f"{cand} ⭐ {c} ovoz"
+        buttons.append([InlineKeyboardButton(text, callback_data=f"vote_{cand}")])
+    return InlineKeyboardMarkup(buttons)
+
+
+# ===================== FORCED SUBSCRIPTION CHECK =====================
+
+async def check_subscription(bot, user_id, channels):
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(ch, user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except:
+            return False
+    return True
+
+
+# ===================== ADMIN FLOW =====================
+
+async def createsurvey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    data = load_data()
+
+    data["counter"] += 1
+    sid = str(data["counter"])
+
+    data["surveys"][sid] = {
+        "title": None,
+        "image": None,
+        "candidates": [],
+        "votes": {},
+        "voted_users": [],
+        "required_channels": [],
+        "active": False,
+        "history": []
+    }
+
+    save_data(data)
+
+    context.user_data["create_id"] = sid
+    await update.message.reply_text("📝 So‘rovnoma nomini kiriting:")
+    
+
+async def set_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "create_id" not in context.user_data:
+        return
+
+    sid = context.user_data["create_id"]
+    data = load_data()
+    data["surveys"][sid]["title"] = update.message.text
+
+    save_data(data)
+    del context.user_data["create_id"]
+
+    context.user_data["add_candidates"] = sid
+    await update.message.reply_text("Nomzodlarni har qatorda bittadan kiriting:")
+
+
+async def set_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "add_candidates" not in context.user_data:
+        return
+
+    sid = context.user_data["add_candidates"]
+    data = load_data()
+
+    lines = update.message.text.split("\n")
+    candidates = [c.strip() for c in lines if c.strip()]
+
+    data["surveys"][sid]["candidates"] = candidates
+    data["surveys"][sid]["votes"] = {c: 0 for c in candidates}
+
+    save_data(data)
+    del context.user_data["add_candidates"]
+
+    context.user_data["add_image"] = sid
+    await update.message.reply_text("Rasm yuboring:")
+
+
+async def set_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "add_image" not in context.user_data:
+        return
+
+    sid = context.user_data["add_image"]
+    data = load_data()
+
+    photo = update.message.photo[-1].file_id
+    data["surveys"][sid]["image"] = photo
+
+    save_data(data)
+    del context.user_data["add_image"]
+
+    context.user_data["add_channels"] = sid
+    await update.message.reply_text(
+        "Majburiy a’zo bo‘lish kerak bo‘lgan kanallarni (faqat @kanal_nomi) har qatorda bittadan kiriting:\n"
+    )
+
+
+async def set_required_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "add_channels" not in context.user_data:
+        return
+
+    sid = context.user_data["add_channels"]
+    data = load_data()
+
+    lines = update.message.text.split("\n")
+    channels = []
+
+    for ch in lines:
+        ch = ch.strip()
+        if ch.startswith("@"):
+            channels.append(ch)
+
+    data["surveys"][sid]["required_channels"] = channels
+    data["surveys"][sid]["active"] = True
+
+    save_data(data)
+    del context.user_data["add_channels"]
+
+    await update.message.reply_text("🎉 So‘rovnoma muvaffaqiyatli yaratildi!")
+
+
+# ===================== USER FLOW =====================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+
+    active = [
+        (sid, s["title"]) for sid, s in data["surveys"].items() if s["active"]
+    ]
+
+    if not active:
+        await update.message.reply_text("Hozircha aktiv so‘rovnoma yo‘q.")
+        return
+
+    buttons = [
+        [InlineKeyboardButton(title, callback_data=f"open_{sid}")]
+        for sid, title in active
+    ]
+
+    await update.message.reply_text(
+        "Aktiv so‘rovnomalar:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def open_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    sid = query.data.replace("open_", "")
+
+    data = load_data()
+    survey = data["surveys"][sid]
+    user_id = query.from_user.id
+
+    # majburiy kanal tekshiruvi
+    ok = await check_subscription(context.bot, user_id, survey["required_channels"])
+
+    if not ok:
+        btn = [
+            [InlineKeyboardButton(f"📢 {ch} ga qo‘shilish", url=f"https://t.me/{ch[1:]}")]
+            for ch in survey["required_channels"]
+        ]
+        btn.append([InlineKeyboardButton("✔ Tekshirish", callback_data=f"check_{sid}")])
+
+        await query.message.reply_text(
+            "❗ Ushbu so‘rovnomada qatnashish uchun ushbu kanallarga a’zo bo‘ling:",
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
+        return
+
+    # ovoz berish tugmalar
+    keyboard = get_candidate_buttons(survey)
+
+    if survey["image"]:
+        await query.message.reply_photo(
+            survey["image"],
+            caption=survey["title"],
+            reply_markup=keyboard
+        )
+    else:
+        await query.message.reply_text(survey["title"], reply_markup=keyboard)
+
+
+async def check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    sid = query.data.replace("check_", "")
+    data = load_data()
+    survey = data["surveys"][sid]
+
+    user_id = query.from_user.id
+    ok = await check_subscription(context.bot, user_id, survey["required_channels"])
+
+    if not ok:
+        await query.answer("❗ Hali barcha kanallarga a’zo bo‘lmagansiz!", show_alert=True)
+        return
+
+    await query.edit_message_text("🎉 Endi ovoz berishingiz mumkin!")
+    keyboard = get_candidate_buttons(survey)
+    await query.message.reply_text(survey["title"], reply_markup=keyboard)
+
+
+async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = load_data()
+
+    # survey_id aniqlaymiz
+    sid = None
+    for key, survey in data["surveys"].items():
+        for cand in survey["candidates"]:
+            if query.data == f"vote_{cand}":
+                sid = key
+                candidate = cand
+
+    if sid is None:
+        return
+
+    survey = data["surveys"][sid]
+
+    if user_id in survey["voted_users"]:
+        await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
+        return
+
+    # ovoz qo‘shish
+    survey["votes"][candidate] += 1
+    survey["voted_users"].append(user_id)
+
+    survey["history"].append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "candidate": candidate
+    })
+
+    save_data(data)
+
+    keyboard = get_candidate_buttons(survey)
+
+    await query.edit_message_caption(
+        caption=f"{survey['title']}\n✔ Siz «{candidate}» uchun ovoz berdingiz!",
+        reply_markup=keyboard
+    )
+
+
+# ===================== APP =====================
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("createsurvey", createsurvey))
+app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), set_title))
+app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), set_candidates))
+app.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), set_image))
+app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), set_required_channels))
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(open_survey, pattern="open_"))
+app.add_handler(CallbackQueryHandler(check_callback, pattern="check_"))
+app.add_handler(CallbackQueryHandler(vote, pattern="vote_"))
+
+app.run_polling()
