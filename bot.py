@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 pool = None
 
