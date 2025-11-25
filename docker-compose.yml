@@ -22,7 +22,7 @@ services:
     environment:
       TOKEN: "7196045219:AAFfbeIZQXKAb_cgAC2cnbdMY__L0Iakcrg"
       DATABASE_URL: "postgresql://postgres:IJgDkPQTgFQTJqTomCNezddMsHJJPDmm@postgres.railway.internal:5432/railway"
-      ADMIN_ID: "YOUR_ADMIN_ID_HERE"
+      ADMIN_ID: "1262207928"
     restart: always
 
 volumes:
