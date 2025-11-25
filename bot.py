@@ -3,7 +3,7 @@ import asyncio
 import os
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
@@ -54,9 +54,8 @@ class CreateSurvey(StatesGroup):
     waiting_for_image = State()
     waiting_for_candidate = State()
     waiting_for_channel = State()
-    confirm = State()
 
-# ====================== KEYBOARD ======================
+# ====================== KEYBOARDS ======================
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -75,6 +74,12 @@ def finish_keyboard():
         resize_keyboard=True
     )
 
+def candidates_keyboard(candidates):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{c['name']} ⭐ {c['votes']}", callback_data=f"vote_{c['id']}")]
+        for c in candidates
+    ])
+
 # ====================== HELPERS ======================
 async def get_surveys():
     async with pool.acquire() as conn:
@@ -87,18 +92,27 @@ async def get_survey(survey_id: int):
         channels = await conn.fetch("SELECT channel FROM required_channels WHERE survey_id=$1", survey_id)
         return survey, candidates, channels
 
+async def user_has_voted(survey_id: int, user_id: int) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM voted_users WHERE survey_id=$1 AND user_id=$2", survey_id, user_id)
+        return row is not None
+
+async def add_vote(survey_id: int, candidate_id: int, user_id: int):
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("UPDATE candidates SET votes=votes+1 WHERE id=$1", candidate_id)
+            await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
+
 # ====================== ADMIN PANEL ======================
 @dp.message(F.text)
 async def admin_panel(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
 
-    # ➕ So‘rovnoma yaratish
     if message.text == "➕ So‘rovnoma yaratish":
         await message.answer("📝 So‘rovnoma nomini yuboring:")
         await state.set_state(CreateSurvey.waiting_for_title)
 
-    # 📋 So‘rovnomalarni ko‘rish
     elif message.text == "📋 So‘rovnomalarni ko‘rish":
         surveys = await get_surveys()
         if not surveys:
@@ -109,7 +123,6 @@ async def admin_panel(message: types.Message, state: FSMContext):
                 text += f"- {s['id']}: {s['title']}\n"
             await message.answer(text)
 
-    # 📊 Natijalarni ko‘rish
     elif message.text == "📊 Natijalarni ko‘rish":
         surveys = await get_surveys()
         if not surveys:
@@ -122,12 +135,10 @@ async def admin_panel(message: types.Message, state: FSMContext):
                     text += f"- {c['name']} ⭐ {c['votes']}\n"
                 await message.answer(text)
 
-    # ➕ Nomzod qo‘shish
     elif message.text == "➕ Nomzod qo‘shish":
         await message.answer("✍ Nomzod nomini yuboring:", reply_markup=finish_keyboard())
         await state.set_state(CreateSurvey.waiting_for_candidate)
 
-    # 📢 Kanal qo‘shish
     elif message.text == "📢 Kanal qo‘shish":
         await message.answer("✍ Kanal nomini yuboring (@kanal):", reply_markup=finish_keyboard())
         await state.set_state(CreateSurvey.waiting_for_channel)
@@ -178,11 +189,46 @@ async def process_channel(message: types.Message, state: FSMContext):
             await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, message.text)
         await message.answer(f"✅ Kanal qo‘shildi: {message.text}")
 
-# ====================== RUN ======================
-async def main():
-    await setup_db()
-    print("Bot ishga tushdi...")
-    await dp.start_polling(bot)
+# ====================== USER VOTING ======================
+@dp.message(F.text == "/start")
+async def cmd_start(message: types.Message):
+    surveys = await get_surveys()
+    if not surveys:
+        await message.answer("Hozircha aktiv so‘rovnoma yo‘q.")
+        return
+    buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
+    await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.callback_query(F.data.startswith("open_"))
+async def open_survey_callback(query: types.CallbackQuery):
+    survey_id = int(query.data.replace("open_", ""))
+    survey, candidates, _ = await get_survey(survey_id)
+    kb = candidates_keyboard(candidates)
+    if survey['image']:
+@dp.callback_query(F.data.startswith("open_"))
+async def open_survey_callback(query: types.CallbackQuery):
+    survey_id = int(query.data.replace("open_", ""))
+    survey, candidates, _ = await get_survey(survey_id)
+    kb = candidates_keyboard(candidates)
+    if survey['image']:
+        await query.message.answer_photo(survey['image'], caption=survey['title'], reply_markup=kb)
+    else:
+        await query.message.answer(survey['title'], reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("vote_"))
+async def vote_callback(query: types.CallbackQuery):
+    candidate_id = int(query.data.replace("vote_", ""))
+    async with pool.acquire() as conn:
+        cand = await conn.fetchrow("SELECT * FROM candidates WHERE id=$1", candidate_id)
+        survey_id = cand['survey_id']
+
+    if await user_has_voted(survey_id, query.from_user.id):
+        await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
+        return
+
+    await add_vote(survey_id, candidate_id, query.from_user.id)
+    _, candidates, _ = await get_survey(survey_id)
+    kb = candidates_keyboard(candidates)
+
+    await query.message.edit_reply_markup(kb)
+    await query.answer("✔ Ovoz berildi!")
