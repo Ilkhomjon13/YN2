@@ -84,6 +84,28 @@ def candidates_keyboard(candidates):
     ])
 
 # ====================== HELPERS ======================
+def normalize_channel(value: str) -> str:
+    v = value.strip()
+    if v.startswith("https://t.me/"):
+        v = v.replace("https://t.me/", "")
+        # t.me/joinchat/ link bo‘lsa, get_chat_member ishlamaydi; bunday holatda faqat linkni ko‘rsatamiz
+        if "/" in v:
+            return value  # link sifatida qaytaramiz
+        return f"@{v}"
+    if v.startswith("@"):
+        return v
+    # numeric chat id (supergroup/channel)
+    return v
+
+def join_button_for(channel: str) -> InlineKeyboardButton:
+    # Agar @handle bo‘lsa t.me link yasaymiz, aks holda berilgan linkni ishlatamiz
+    if channel.startswith("@"):
+        return InlineKeyboardButton(text=f"➕ {channel} ga obuna bo‘ling", url=f"https://t.me/{channel[1:]}")
+    if channel.startswith("https://t.me/"):
+        return InlineKeyboardButton(text="➕ Obuna bo‘ling", url=channel)
+    # numeric id uchun link yo‘q; faqat nomini ko‘rsatamiz
+    return InlineKeyboardButton(text="➕ Kanal/guruhga obuna bo‘ling", url="https://t.me")  # fallback
+
 async def get_surveys():
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM surveys WHERE active=true ORDER BY id DESC")
@@ -106,6 +128,17 @@ async def add_vote(survey_id: int, candidate_id: int, user_id: int):
         async with conn.transaction():
             await conn.execute("UPDATE candidates SET votes=votes+1 WHERE id=$1", candidate_id)
             await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
+
+async def is_member(bot: Bot, user_id: int, channel: str) -> bool:
+    ch = normalize_channel(channel)
+    try:
+        # Agar link bo‘lsa (joinchat), get_chat_member ishlamaydi; bunday holatda tekshira olmaymiz
+        if ch.startswith("https://t.me/") and "/joinchat/" in ch:
+            return False
+        member = await bot.get_chat_member(ch, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        return False
 
 # ====================== START (admin + user) ======================
 @dp.message(F.text == "/start")
@@ -169,7 +202,7 @@ async def admin_add_candidate(message: types.Message, state: FSMContext):
 async def admin_add_channel(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("✍ Kanal nomini yuboring (@kanal):", reply_markup=finish_keyboard())
+    await message.answer("✍ Kanal/guruh nomini yuboring (@kanal, https://t.me/kanal yoki -100id):", reply_markup=finish_keyboard())
     await state.set_state(CreateSurvey.waiting_for_channel)
 
 # ====================== FSM HANDLERS ======================
@@ -177,8 +210,12 @@ async def admin_add_channel(message: types.Message, state: FSMContext):
 async def process_title(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
+    title = message.text.strip()
+    if not title:
+        await message.answer("Nom bo‘sh bo‘lmasin. Qayta yuboring.")
+        return
     async with pool.acquire() as conn:
-        survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", message.text)
+        survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", title)
     await state.update_data(survey_id=survey['id'])
     await message.answer("📷 Rasm yuboring yoki '✅ Tugatish' tugmasini bosing", reply_markup=finish_keyboard())
     await state.set_state(CreateSurvey.waiting_for_image)
@@ -205,12 +242,16 @@ async def process_candidate(message: types.Message, state: FSMContext):
     data = await state.get_data()
     survey_id = data['survey_id']
     if message.text == "✅ Tugatish":
-        await message.answer("📢 Kanal nomini yuboring (@kanal):", reply_markup=finish_keyboard())
+        await message.answer("📢 Kanal/guruh nomini yuboring (@kanal, https://t.me/kanal yoki -100id):", reply_markup=finish_keyboard())
         await state.set_state(CreateSurvey.waiting_for_channel)
     else:
+        name = message.text.strip()
+        if not name:
+            await message.answer("Nomzod nomi bo‘sh bo‘lmasin.")
+            return
         async with pool.acquire() as conn:
-            await conn.execute("INSERT INTO candidates (survey_id, name) VALUES ($1, $2)", survey_id, message.text)
-        await message.answer(f"✅ Nomzod qo‘shildi: {message.text}")
+            await conn.execute("INSERT INTO candidates (survey_id, name) VALUES ($1, $2)", survey_id, name)
+        await message.answer(f"✅ Nomzod qo‘shildi: {name}")
 
 @dp.message(CreateSurvey.waiting_for_channel)
 async def process_channel(message: types.Message, state: FSMContext):
@@ -222,9 +263,13 @@ async def process_channel(message: types.Message, state: FSMContext):
         await message.answer("✅ So‘rovnoma tayyor!", reply_markup=admin_keyboard())
         await state.clear()
     else:
+        ch = message.text.strip()
+        if not ch:
+            await message.answer("Kanal/guruh nomi bo‘sh bo‘lmasin.")
+            return
         async with pool.acquire() as conn:
-            await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, message.text)
-        await message.answer(f"✅ Kanal qo‘shildi: {message.text}")
+            await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, ch)
+        await message.answer(f"✅ Qo‘shildi: {ch}")
 
 # ====================== USER VOTING ======================
 @dp.callback_query(F.data.startswith("open_"))
@@ -235,7 +280,7 @@ async def open_survey_callback(query: types.CallbackQuery):
 
     caption = survey['title'] if survey else "So‘rovnoma topilmadi."
     if channels:
-        caption += "\n\nTalab kanallar:\n" + "\n".join([f"- {row['channel']}" for row in channels])
+        caption += "\n\nTalab kanallar/guruhlar:\n" + "\n".join([f"- {row['channel']}" for row in channels])
 
     if survey and survey['image']:
         await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
@@ -256,6 +301,29 @@ async def vote_callback(query: types.CallbackQuery):
         await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
         return
 
+    # A’zolik tekshiruvi
+    _, _, channels = await get_survey(survey_id)
+    not_joined = []
+    for row in channels:
+        ch = normalize_channel(row['channel'])
+        ok = await is_member(bot, query.from_user.id, ch)
+        if not ok:
+            not_joined.append(ch)
+
+    if not_joined:
+        # Ogohlantirish va join tugmalari
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[join_button_for(ch)] for ch in not_joined] + 
+                            [[InlineKeyboardButton(text="🔄 Tekshirish", callback_data=f"recheck_{survey_id}")]]
+        )
+        await query.message.answer(
+            "Ovoz berish uchun quyidagi kanal/guruhlarga obuna bo‘lish majburiy:",
+            reply_markup=kb
+        )
+        await query.answer("Avval obuna bo‘ling, keyin ovoz bering.", show_alert=True)
+        return
+
+    # Ovoz berish
     await add_vote(survey_id, candidate_id, query.from_user.id)
     _, candidates, _ = await get_survey(survey_id)
     kb = candidates_keyboard(candidates)
@@ -266,6 +334,22 @@ async def vote_callback(query: types.CallbackQuery):
         await query.message.answer("Yangi natijalar:", reply_markup=kb)
 
     await query.answer("✔ Ovoz berildi!")
+
+@dp.callback_query(F.data.startswith("recheck_"))
+async def recheck_callback(query: types.CallbackQuery):
+    survey_id = int(query.data.replace("recheck_", ""))
+    _, _, channels = await get_survey(survey_id)
+    not_joined = []
+    for row in channels:
+        ch = normalize_channel(row['channel'])
+        ok = await is_member(bot, query.from_user.id, ch)
+        if not ok:
+            not_joined.append(ch)
+
+    if not_joined:
+        await query.answer("Hali ham obuna bo‘lmagansiz. Iltimos, obuna bo‘ling.", show_alert=True)
+    else:
+        await query.answer("A’zolik tasdiqlandi. Endi ovoz bera olasiz.", show_alert=True)
 
 # ====================== RUN ======================
 async def main():
