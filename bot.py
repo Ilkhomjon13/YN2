@@ -27,6 +27,7 @@ async def setup_db():
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
+            image TEXT,
             active BOOLEAN DEFAULT TRUE
         );
         CREATE TABLE IF NOT EXISTS candidates (
@@ -40,13 +41,20 @@ async def setup_db():
             survey_id INT REFERENCES surveys(id),
             channel TEXT
         );
+        CREATE TABLE IF NOT EXISTS voted_users (
+            survey_id INT REFERENCES surveys(id),
+            user_id BIGINT,
+            PRIMARY KEY(survey_id, user_id)
+        );
         """)
 
 # ====================== FSM ======================
-class AdminStates(StatesGroup):
-    waiting_for_survey_title = State()
-    waiting_for_candidate_name = State()
-    waiting_for_channel_name = State()
+class CreateSurvey(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_image = State()
+    waiting_for_candidate = State()
+    waiting_for_channel = State()
+    confirm = State()
 
 # ====================== KEYBOARD ======================
 def admin_keyboard():
@@ -58,6 +66,12 @@ def admin_keyboard():
             [KeyboardButton(text="➕ Nomzod qo‘shish")],
             [KeyboardButton(text="📢 Kanal qo‘shish")]
         ],
+        resize_keyboard=True
+    )
+
+def finish_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="✅ Tugatish")]],
         resize_keyboard=True
     )
 
@@ -82,7 +96,7 @@ async def admin_panel(message: types.Message, state: FSMContext):
     # ➕ So‘rovnoma yaratish
     if message.text == "➕ So‘rovnoma yaratish":
         await message.answer("📝 So‘rovnoma nomini yuboring:")
-        await state.set_state(AdminStates.waiting_for_survey_title)
+        await state.set_state(CreateSurvey.waiting_for_title)
 
     # 📋 So‘rovnomalarni ko‘rish
     elif message.text == "📋 So‘rovnomalarni ko‘rish":
@@ -110,37 +124,59 @@ async def admin_panel(message: types.Message, state: FSMContext):
 
     # ➕ Nomzod qo‘shish
     elif message.text == "➕ Nomzod qo‘shish":
-        await message.answer("✍ Nomzod nomini yuboring:")
-        await state.set_state(AdminStates.waiting_for_candidate_name)
+        await message.answer("✍ Nomzod nomini yuboring:", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_candidate)
 
     # 📢 Kanal qo‘shish
     elif message.text == "📢 Kanal qo‘shish":
-        await message.answer("✍ Kanal nomini yuboring (masalan: @kanal):")
-        await state.set_state(AdminStates.waiting_for_channel_name)
+        await message.answer("✍ Kanal nomini yuboring (@kanal):", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_channel)
 
 # ====================== FSM HANDLERS ======================
-@dp.message(AdminStates.waiting_for_survey_title)
-async def process_survey_title(message: types.Message, state: FSMContext):
+@dp.message(CreateSurvey.waiting_for_title)
+async def process_title(message: types.Message, state: FSMContext):
     async with pool.acquire() as conn:
         survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", message.text)
-    await message.answer(f"✅ So‘rovnoma yaratildi (ID: {survey['id']})", reply_markup=admin_keyboard())
-    await state.clear()
+    await state.update_data(survey_id=survey['id'])
+    await message.answer("📷 Rasm yuboring yoki '✅ Tugatish' tugmasini bosing", reply_markup=finish_keyboard())
+    await state.set_state(CreateSurvey.waiting_for_image)
 
-@dp.message(AdminStates.waiting_for_candidate_name)
-async def process_candidate_name(message: types.Message, state: FSMContext):
-    async with pool.acquire() as conn:
-        survey = await conn.fetchrow("SELECT id FROM surveys ORDER BY id DESC LIMIT 1")
-        await conn.execute("INSERT INTO candidates (survey_id, name) VALUES ($1, $2)", survey['id'], message.text)
-    await message.answer(f"✅ Nomzod qo‘shildi: {message.text}", reply_markup=admin_keyboard())
-    await state.clear()
+@dp.message(CreateSurvey.waiting_for_image)
+async def process_image(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE surveys SET image=$1 WHERE id=$2", photo_id, survey_id)
+        await message.answer("✅ Rasm qo‘shildi.")
+    elif message.text == "✅ Tugatish":
+        await message.answer("✍ Nomzod nomini yuboring:", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_candidate)
 
-@dp.message(AdminStates.waiting_for_channel_name)
-async def process_channel_name(message: types.Message, state: FSMContext):
-    async with pool.acquire() as conn:
-        survey = await conn.fetchrow("SELECT id FROM surveys ORDER BY id DESC LIMIT 1")
-        await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey['id'], message.text)
-    await message.answer(f"✅ Kanal qo‘shildi: {message.text}", reply_markup=admin_keyboard())
-    await state.clear()
+@dp.message(CreateSurvey.waiting_for_candidate)
+async def process_candidate(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.text == "✅ Tugatish":
+        await message.answer("📢 Kanal nomini yuboring (@kanal):", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_channel)
+    else:
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO candidates (survey_id, name) VALUES ($1, $2)", survey_id, message.text)
+        await message.answer(f"✅ Nomzod qo‘shildi: {message.text}")
+
+@dp.message(CreateSurvey.waiting_for_channel)
+async def process_channel(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.text == "✅ Tugatish":
+        await message.answer("✅ So‘rovnoma tayyor!", reply_markup=admin_keyboard())
+        await state.clear()
+    else:
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, message.text)
+        await message.answer(f"✅ Kanal qo‘shildi: {message.text}")
 
 # ====================== RUN ======================
 async def main():
