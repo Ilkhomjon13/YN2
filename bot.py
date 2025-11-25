@@ -1,30 +1,26 @@
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
-import matplotlib.pyplot as plt
-import pandas as pd
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from db import create_pool, init_db
 from config import TOKEN, ADMIN_ID
-
-import asyncio
-from datetime import datetime
+import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)
 
-# ====================== BAZA POOL ======================
 pool = None
 
+# ====================== DATABASE SETUP ======================
 async def setup_db():
     global pool
     pool = await create_pool()
     await init_db(pool)
 
 # ====================== HELPERS ======================
-
 async def get_surveys():
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM surveys WHERE active=true")
@@ -57,15 +53,11 @@ async def check_channels(user_id, channels):
     return True
 
 # ====================== KEYBOARD ======================
-
 def candidates_keyboard(candidates):
-    buttons = []
-    for cand in candidates:
-        buttons.append([InlineKeyboardButton(f"{cand['name']} ⭐ {cand['votes']}", callback_data=f"vote_{cand['id']}")])
+    buttons = [[InlineKeyboardButton(f"{c['name']} ⭐ {c['votes']}", callback_data=f"vote_{c['id']}")] for c in candidates]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ====================== HANDLERS ======================
-
 @dp.message(Command(commands=["start"]))
 async def cmd_start(message: types.Message):
     surveys = await get_surveys()
@@ -81,8 +73,7 @@ async def open_survey_callback(query: types.CallbackQuery):
     survey, candidates, channels = await get_survey(survey_id)
     user_id = query.from_user.id
 
-    ok = await check_channels(user_id, channels)
-    if not ok:
+    if not await check_channels(user_id, channels):
         buttons = [[InlineKeyboardButton(f"📢 {ch} ga qo‘shilish", url=f"https://t.me/{ch[1:]}")] for ch in channels]
         buttons.append([InlineKeyboardButton("✔ Tekshirish", callback_data=f"check_{survey_id}")])
         await query.message.answer("❗ Ushbu so‘rovnomada qatnashish uchun kanallarga a’zo bo‘ling:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -100,8 +91,7 @@ async def check_callback(query: types.CallbackQuery):
     survey, candidates, channels = await get_survey(survey_id)
     user_id = query.from_user.id
 
-    ok = await check_channels(user_id, channels)
-    if not ok:
+    if not await check_channels(user_id, channels):
         await query.answer("❗ Hali barcha kanallarga a’zo bo‘lmagansiz!", show_alert=True)
         return
 
@@ -113,7 +103,6 @@ async def vote_callback(query: types.CallbackQuery):
     candidate_id = int(query.data.replace("vote_", ""))
     user_id = query.from_user.id
 
-    # candidate -> survey
     async with pool.acquire() as conn:
         cand = await conn.fetchrow("SELECT * FROM candidates WHERE id=$1", candidate_id)
         survey_id = cand['survey_id']
@@ -123,18 +112,30 @@ async def vote_callback(query: types.CallbackQuery):
         return
 
     await add_vote(survey_id, candidate_id, user_id)
-    # Yangilangan keyboard
     _, candidates, _ = await get_survey(survey_id)
     kb = candidates_keyboard(candidates)
-
     await query.message.edit_reply_markup(kb)
     await query.answer("✔ Ovoz berildi!")
 
-# ====================== RUN ======================
+# ====================== STATS (GRAPH) ======================
+async def send_stats(chat_id, survey_id):
+    async with pool.acquire() as conn:
+        data = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1", survey_id)
+        names = [row['name'] for row in data]
+        votes = [row['votes'] for row in data]
 
+    plt.figure(figsize=(6,4))
+    plt.bar(names, votes, color='skyblue')
+    plt.title("So'rovnoma natijalari")
+    plt.ylabel("Ovozlar soni")
+    plt.savefig("stats.png")
+    plt.close()
+    await bot.send_photo(chat_id, open("stats.png", "rb"))
+
+# ====================== RUN BOT ======================
 async def main():
     await setup_db()
-    await dp.start_polling(bot)
+    await dp.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
