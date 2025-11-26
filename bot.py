@@ -311,10 +311,14 @@ async def admin_list_surveys(message: types.Message):
     if not surveys:
         await message.answer("❌ Aktiv so‘rovnoma yo‘q.")
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s['id']}: {short_title(s.get('short_title') or s.get('title') or 'So\\'rovnoma', limit=38)}", callback_data=f"admin_open_{s['id']}")]
-        for s in surveys
-    ])
+
+    buttons = []
+    for s in surveys:
+        default_title = s.get('short_title') or s.get('title') or "So'rovnoma"
+        label = short_title(default_title, limit=38)
+        buttons.append([InlineKeyboardButton(text=f"{s['id']}: {label}", callback_data=f"admin_open_{s['id']}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("admin_open_"))
