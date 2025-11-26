@@ -14,6 +14,7 @@ from aiogram.types import (
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
+# Load environment
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
@@ -31,7 +32,7 @@ if not DATABASE_URL:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ===== DB setup =====
+# ====================== DATABASE ======================
 pool: asyncpg.pool.Pool = None
 
 async def setup_db():
@@ -69,7 +70,7 @@ async def setup_db():
         );
         """)
 
-# ===== FSM =====
+# ====================== FSM ======================
 class CreateSurvey(StatesGroup):
     waiting_for_title = State()
     waiting_for_image = State()
@@ -79,7 +80,7 @@ class CreateSurvey(StatesGroup):
 class Broadcast(StatesGroup):
     waiting_for_message = State()
 
-# ===== Keyboards =====
+# ====================== HELPERS & KEYBOARDS ======================
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -103,7 +104,12 @@ def candidates_keyboard_premium(candidates):
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"vote_{c['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ===== Helpers =====
+def short_title(title: str, limit: int = 38) -> str:
+    title = title.strip()
+    if len(title) <= limit:
+        return title
+    return title[:limit-1].rstrip() + "…"
+
 def normalize_channel(value: str) -> str:
     v = value.strip()
     if v.startswith("https://t.me/"):
@@ -123,6 +129,7 @@ def join_button_for(channel: str) -> InlineKeyboardButton:
         return InlineKeyboardButton(text="➕ Obuna bo‘lish", url=ch)
     return InlineKeyboardButton(text="➕ Kanal/guruhga obuna bo‘lish", url="https://t.me")
 
+# ====================== DB HELPERS ======================
 async def get_surveys():
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM surveys WHERE active=true ORDER BY id DESC")
@@ -166,9 +173,10 @@ async def is_member(bot: Bot, user_id: int, channel_raw: str) -> bool:
     except Exception:
         return False
 
-# ===== User registration on /start =====
+# ====================== USER REGISTRATION & START ======================
 @dp.message(F.text == "/start")
 async def start_handler(message: types.Message):
+    # Save or update user
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = (message.from_user.full_name or "").strip()
@@ -178,17 +186,27 @@ async def start_handler(message: types.Message):
             VALUES ($1, $2, $3, now())
             ON CONFLICT (id) DO UPDATE SET username=$2, full_name=$3
         """, user_id, username, full_name)
+
+    # Admin view
     if message.from_user.id == ADMIN_ID:
         await message.answer("👨‍💼 Admin panel:", reply_markup=admin_keyboard())
         return
+
+    # User view: show short titles as inline buttons
     surveys = await get_surveys()
     if not surveys:
         await message.answer("Hozircha aktiv so‘rovnoma yo‘q.")
         return
-    buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
-    await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ===== Admin: create survey =====
+    buttons = []
+    for s in surveys:
+        label = short_title(s['title'], limit=38)
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s['id']}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:", reply_markup=kb)
+
+# ====================== ADMIN: CREATE SURVEY ======================
 @dp.message(F.text == "➕ So‘rovnoma yaratish")
 async def admin_create_survey(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -261,7 +279,7 @@ async def process_channel(message: types.Message, state: FSMContext):
             await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, ch)
         await message.answer(f"✅ Qo‘shildi: {ch}")
 
-# ===== Admin: list surveys (inline) =====
+# ====================== ADMIN: LIST SURVEYS (inline) ======================
 @dp.message(F.text == "📋 So‘rovnomalarni ko‘rish")
 async def admin_list_surveys(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -271,12 +289,11 @@ async def admin_list_surveys(message: types.Message):
         await message.answer("❌ Aktiv so‘rovnoma yo‘q.")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s['id']}: {s['title']}", callback_data=f"admin_open_{s['id']}")]
+        [InlineKeyboardButton(text=f"{s['id']}: {short_title(s['title'], limit=38)}", callback_data=f"admin_open_{s['id']}")]
         for s in surveys
     ])
     await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
 
-# ===== Admin: open selected survey (shows Stop) =====
 @dp.callback_query(F.data.startswith("admin_open_"))
 async def admin_open_survey_callback(query: types.CallbackQuery):
     if query.from_user.id != ADMIN_ID:
@@ -298,7 +315,7 @@ async def admin_open_survey_callback(query: types.CallbackQuery):
     await query.message.answer(text, reply_markup=kb)
     await query.answer()
 
-# ===== Admin: stop =====
+# ====================== ADMIN: STOP & DELETE ======================
 @dp.callback_query(F.data.startswith("stop_"))
 async def admin_stop_survey_callback(query: types.CallbackQuery):
     if query.from_user.id != ADMIN_ID:
@@ -335,7 +352,6 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
     )
     await query.answer("So‘rovnoma yopildi va qatnashganlarga xabar yuborildi.")
 
-# ===== Admin: delete =====
 @dp.callback_query(F.data.startswith("delete_"))
 async def admin_delete_survey_callback(query: types.CallbackQuery):
     if query.from_user.id != ADMIN_ID:
@@ -351,7 +367,7 @@ async def admin_delete_survey_callback(query: types.CallbackQuery):
     await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
     await query.answer("So‘rovnoma o‘chirildi.")
 
-# ===== Subscribers list =====
+# ====================== SUBSCRIBERS & BROADCAST ======================
 @dp.message(F.text == "📋 Obunachilar")
 async def admin_subscribers(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -371,7 +387,6 @@ async def admin_subscribers(message: types.Message):
         text += f"\n... va yana {total-100} ta foydalanuvchi."
     await message.answer(text)
 
-# ===== Broadcast =====
 @dp.message(F.text == "✉️ Xabar yuborish")
 async def admin_broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -430,19 +445,32 @@ async def cancel_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Amal bekor qilindi.")
 
-# ===== User voting handlers (open, vote, recheck) =====
+# ====================== USER VOTING HANDLERS ======================
 @dp.callback_query(F.data.startswith("open_"))
 async def open_survey_callback(query: types.CallbackQuery):
     survey_id = int(query.data.replace("open_", ""))
     survey, candidates, channels = await get_survey(survey_id)
-    caption = f"🌟 PREMIUM KO'RINISH: {survey['title']}\n\nSizga boyroq ko‘rinish taqdim etildi."
+    if not survey:
+        await query.answer("So‘rovnoma topilmadi.", show_alert=True)
+        return
+    caption_lines = [f"🌟 {survey['title']}"]
     if channels:
-        caption += "\n\nTalab kanallar/guruhlar:\n" + "\n".join([f"- {row['channel']}" for row in channels])
+        caption_lines.append("\nTalab kanallar/guruhlar:")
+        for row in channels:
+            caption_lines.append(f"- {row['channel']}")
+    caption_lines.append("\nNomzodlar:")
+    for c in candidates:
+        caption_lines.append(f"- {c['name']}  —  {c['votes']} ovoz")
+    caption = "\n".join(caption_lines)
     kb = candidates_keyboard_premium(candidates)
-    if survey and survey['image']:
-        await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+    if survey.get('image'):
+        try:
+            await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+        except Exception:
+            await query.message.answer(caption, reply_markup=kb)
     else:
         await query.message.answer(caption, reply_markup=kb)
+    await query.answer()
 
 @dp.callback_query(F.data.startswith("vote_"))
 async def vote_callback(query: types.CallbackQuery):
@@ -506,7 +534,7 @@ async def recheck_callback(query: types.CallbackQuery):
         await query.message.answer(caption, reply_markup=kb)
     await query.answer("A’zolik tasdiqlandi. Ovoz berishingiz mumkin.", show_alert=True)
 
-# ===== Run =====
+# ====================== RUN ======================
 async def main():
     await setup_db()
     logging.info("Bot ishga tushdi...")
