@@ -276,10 +276,16 @@ async def process_candidate(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     survey_id = data.get('survey_id')
-    if message.text == "✅ Tugatish":
-        await message.answer("✅ So‘rovnoma yaratildi va faollashtirildi.", reply_markup=admin_keyboard())
-        await state.clear()
+
+    # Agar admin Tugatishni bossа, kanal bosqichiga o‘tamiz
+    if (message.text or "").strip() == "✅ Tugatish":
+        await message.answer(
+            "Kanal yoki guruhlarni yuboring. Har bir kanalni alohida xabarda yuboring. Tugatish uchun '✅ Tugatish' tugmasini bosing.",
+            reply_markup=finish_keyboard()
+        )
+        await state.set_state(CreateSurvey.waiting_for_channel)
         return
+
     name = (message.text or "").strip()
     if not name:
         await message.answer("Nomzod nomi bo‘sh bo‘lmasin.")
@@ -294,13 +300,16 @@ async def process_channel(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     survey_id = data.get('survey_id')
-    if message.text == "✅ Tugatish":
+
+    # Tugatish bu yerda yakunlashni amalga oshiradi
+    if (message.text or "").strip() == "✅ Tugatish":
         await message.answer("✅ So‘rovnoma tayyor!", reply_markup=admin_keyboard())
         await state.clear()
         return
+
     ch = (message.text or "").strip()
     if not ch:
-        await message.answer("Kanal/guruh nomi bo‘sh bo‘lmasin.")
+        await message.answer("Kanal/guruh nomi bo‘sh bo‘lishi mumkin emas.")
         return
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, ch)
