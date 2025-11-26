@@ -34,18 +34,15 @@ dp = Dispatcher()
 
 # ====================== DATABASE ======================
 pool: asyncpg.pool.Pool = None
-
 async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     async with pool.acquire() as conn:
-        # Ensure columns exist; safe even if they already exist
+        # create base tables if not exists
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
-            short_title TEXT,
             title TEXT,
-            description TEXT,
             image TEXT,
             active BOOLEAN DEFAULT TRUE
         );
@@ -71,6 +68,15 @@ async def setup_db():
             full_name TEXT,
             joined_at TIMESTAMP DEFAULT now()
         );
+        """)
+        # ensure new columns exist on existing surveys table
+        await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS short_title TEXT;")
+        await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS description TEXT;")
+        # fill short_title for old rows if empty
+        await conn.execute("""
+            UPDATE surveys
+            SET short_title = LEFT(COALESCE(short_title, title, ''), 38)
+            WHERE short_title IS NULL OR short_title = '';
         """)
 
 # ====================== FSM ======================
