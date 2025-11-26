@@ -43,7 +43,7 @@ async def setup_db():
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
-            short_title TEXT NOT NULL,
+            short_title TEXT,
             title TEXT,
             description TEXT,
             image TEXT,
@@ -104,12 +104,11 @@ def finish_keyboard():
 def candidates_keyboard(candidates):
     buttons = []
     for c in candidates:
-        # nomzodlar faqat tugma sifatida ko'rsatiladi; matnda nomzodlar ko'rsatilmaydi
         buttons.append([InlineKeyboardButton(text=f"{c['name']}", callback_data=f"vote_{c['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def short_title(title: str, limit: int = 38) -> str:
-    title = title.strip()
+    title = (title or "").strip()
     if len(title) <= limit:
         return title
     return title[:limit-1].rstrip() + "…"
@@ -142,7 +141,6 @@ async def get_survey(survey_id: int):
     async with pool.acquire() as conn:
         survey = await conn.fetchrow("SELECT * FROM surveys WHERE id=$1", survey_id)
         candidates = await conn.fetch("SELECT * FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
-        # required_channels kept but not shown in description per your request
         channels = await conn.fetch("SELECT channel FROM required_channels WHERE survey_id=$1 ORDER BY channel", survey_id)
         return survey, candidates, channels
 
@@ -205,13 +203,15 @@ async def start_handler(message: types.Message):
 
     buttons = []
     for s in surveys:
-        label = short_title(s['short_title'] or s.get('title') or "So'rovnoma", limit=38)
+        # use .get to avoid KeyError if column missing
+        short = s.get('short_title') or s.get('title') or "So'rovnoma"
+        label = short_title(short, limit=38)
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s['id']}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:", reply_markup=kb)
 
-# ====================== ADMIN: CREATE SURVEY (short title -> description -> image -> candidates -> finish) ======
+# ====================== ADMIN: CREATE SURVEY ======================
 @dp.message(F.text == "➕ So‘rovnoma yaratish")
 async def admin_create_survey_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -227,7 +227,6 @@ async def process_short_title(message: types.Message, state: FSMContext):
     if not short:
         await message.answer("Qisqa nom bo‘sh bo‘lmasin. Qayta yuboring.")
         return
-    # save short_title temporarily
     await state.update_data(short_title=short)
     await message.answer("✍ Endi so‘rovnoma haqida batafsil matn yuboring (bu matn surat tagida ko‘rinadi):", reply_markup=finish_keyboard())
     await state.set_state(CreateSurvey.waiting_for_description)
@@ -242,7 +241,6 @@ async def process_description(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     short = data.get('short_title')
-    # create survey with short_title and description
     async with pool.acquire() as conn:
         survey = await conn.fetchrow(
             "INSERT INTO surveys (short_title, description) VALUES ($1, $2) RETURNING id",
@@ -288,7 +286,6 @@ async def process_candidate(message: types.Message, state: FSMContext):
 
 @dp.message(CreateSurvey.waiting_for_channel)
 async def process_channel(message: types.Message, state: FSMContext):
-    # kept for backward compatibility if you want to add required channels later
     if message.from_user.id != ADMIN_ID:
         return
     data = await state.get_data()
@@ -315,7 +312,7 @@ async def admin_list_surveys(message: types.Message):
         await message.answer("❌ Aktiv so‘rovnoma yo‘q.")
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s['id']}: {short_title(s['short_title'], limit=38)}", callback_data=f"admin_open_{s['id']}")]
+        [InlineKeyboardButton(text=f"{s['id']}: {short_title(s.get('short_title') or s.get('title') or 'So\\'rovnoma', limit=38)}", callback_data=f"admin_open_{s['id']}")]
         for s in surveys
     ])
     await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
@@ -329,7 +326,7 @@ async def admin_open_survey_callback(query: types.CallbackQuery):
     if not survey:
         return await query.answer("So‘rovnoma topilmadi.", show_alert=True)
 
-    text = f"🗳 So‘rovnoma: {survey['short_title']}\nID: {survey_id}\n\n"
+    text = f"🗳 So‘rovnoma: {survey.get('short_title') or survey.get('title')}\nID: {survey_id}\n\n"
     text += "Nomzodlar (tugmalar orqali ko‘rsatiladi):\n"
     for c in candidates:
         text += f"- {c['name']}\n"
@@ -351,8 +348,7 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
         candidates = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
         voters = await conn.fetch("SELECT user_id FROM voted_users WHERE survey_id=$1", survey_id)
 
-    # Prepare results text (admin and user messages)
-    results_text = f"🔔 So‘rovnoma yopildi: {survey['short_title']}\n\nNatijalar:\n"
+    results_text = f"🔔 So‘rovnoma yopildi: {survey.get('short_title') or 'So\\'rovnoma'}\n\nNatijalar:\n"
     for c in candidates:
         results_text += f"- {c['name']}: {c['votes']} ovoz\n"
 
@@ -372,7 +368,7 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
         [InlineKeyboardButton(text="🗑 Delete so‘rovnoma (butunlay o‘chirish)", callback_data=f"delete_{survey_id}")]
     ])
     await query.message.answer(
-        f"So‘rovnoma '{survey['short_title']}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
+        f"So‘rovnoma '{survey.get('short_title') or 'So\\'rovnoma'}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
         reply_markup=delete_kb
     )
     await query.answer("So‘rovnoma yopildi va qatnashganlarga xabar yuborildi.")
@@ -386,13 +382,13 @@ async def admin_delete_survey_callback(query: types.CallbackQuery):
         survey = await conn.fetchrow("SELECT short_title FROM surveys WHERE id=$1", survey_id)
         if not survey:
             return await query.answer("So‘rovnoma topilmadi yoki allaqachon o‘chirib yuborilgan.", show_alert=True)
-        title = survey['short_title']
+        title = survey.get('short_title') or "So'rovnoma"
         await conn.execute("DELETE FROM surveys WHERE id=$1", survey_id)
 
     await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
     await query.answer("So‘rovnoma o‘chirildi.")
 
-# ====================== SUBSCRIBERS & BROADCAST (unchanged) ======================
+# ====================== SUBSCRIBERS & BROADCAST ======================
 @dp.message(F.text == "📋 Obunachilar")
 async def admin_subscribers(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -480,7 +476,7 @@ async def open_survey_callback(query: types.CallbackQuery):
         return
 
     # Show image (if any) and description under it; do NOT include candidate names in text
-    caption = survey['description'] or survey.get('title') or survey['short_title']
+    caption = survey.get('description') or survey.get('title') or survey.get('short_title') or "So'rovnoma"
     kb = candidates_keyboard(candidates)
     if survey.get('image'):
         try:
@@ -503,7 +499,6 @@ async def vote_callback(query: types.CallbackQuery):
     if await user_has_voted(survey_id, query.from_user.id):
         await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
         return
-    # Check required channels if any (but per request, channels are not shown in description)
     _, _, channels = await get_survey(survey_id)
     not_joined = []
     for row in channels:
@@ -546,7 +541,7 @@ async def recheck_callback(query: types.CallbackQuery):
         await query.answer(text, show_alert=True)
         return
     kb = candidates_keyboard(candidates)
-    caption = survey['description'] or survey['short_title']
+    caption = survey.get('description') or survey.get('short_title') or "So'rovnoma"
     if survey and survey.get('image'):
         try:
             await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
