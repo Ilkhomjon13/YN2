@@ -352,7 +352,8 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
         candidates = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
         voters = await conn.fetch("SELECT user_id FROM voted_users WHERE survey_id=$1", survey_id)
 
-    results_text = f"🔔 So‘rovnoma yopildi: {survey.get('short_title') or 'So\\'rovnoma'}\n\nNatijalar:\n"
+    title_for_msg = survey.get('short_title') or "So'rovnoma"
+    results_text = f"🔔 So‘rovnoma yopildi: {title_for_msg}\n\nNatijalar:\n"
     for c in candidates:
         results_text += f"- {c['name']}: {c['votes']} ovoz\n"
 
