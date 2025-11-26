@@ -39,7 +39,7 @@ async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     async with pool.acquire() as conn:
-        # surveys: short_title (button), description (detailed text), image, active
+        # Ensure columns exist; safe even if they already exist
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
@@ -114,7 +114,7 @@ def short_title(title: str, limit: int = 38) -> str:
     return title[:limit-1].rstrip() + "…"
 
 def normalize_channel(value: str) -> str:
-    v = value.strip()
+    v = (value or "").strip()
     if v.startswith("https://t.me/"):
         path = v.replace("https://t.me/", "").strip()
         if "/" in path:
@@ -125,7 +125,7 @@ def normalize_channel(value: str) -> str:
     return v
 
 def join_button_for(channel: str) -> InlineKeyboardButton:
-    ch = channel.strip()
+    ch = (channel or "").strip()
     if ch.startswith("@"):
         return InlineKeyboardButton(text=f"➕ {ch} ga obuna bo‘lish", url=f"https://t.me/{ch[1:]}")
     if ch.startswith("https://t.me/"):
@@ -156,7 +156,7 @@ async def add_vote(survey_id: int, candidate_id: int, user_id: int):
             await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
 
 async def is_member(bot: Bot, user_id: int, channel_raw: str) -> bool:
-    ch = channel_raw.strip()
+    ch = (channel_raw or "").strip()
     if ch.startswith("-100") or (ch.lstrip("-").isdigit() and len(ch) > 3):
         try:
             member = await bot.get_chat_member(int(ch), user_id)
@@ -203,10 +203,14 @@ async def start_handler(message: types.Message):
 
     buttons = []
     for s in surveys:
-        # use .get to avoid KeyError if column missing
-        short = s.get('short_title') or s.get('title') or "So'rovnoma"
-        label = short_title(short, limit=38)
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s['id']}")])
+        # asyncpg.Record supports mapping access; use get via dict conversion for safety
+        try:
+            s_map = dict(s)
+        except Exception:
+            s_map = s
+        default_title = s_map.get('short_title') or s_map.get('title') or "So'rovnoma"
+        label = short_title(default_title, limit=38)
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s_map.get('id')}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:", reply_markup=kb)
@@ -223,7 +227,7 @@ async def admin_create_survey_start(message: types.Message, state: FSMContext):
 async def process_short_title(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    short = message.text.strip()
+    short = (message.text or "").strip()
     if not short:
         await message.answer("Qisqa nom bo‘sh bo‘lmasin. Qayta yuboring.")
         return
@@ -235,7 +239,7 @@ async def process_short_title(message: types.Message, state: FSMContext):
 async def process_description(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    desc = message.text.strip()
+    desc = (message.text or "").strip()
     if not desc:
         await message.answer("Batafsil matn bo‘sh bo‘lmasin. Qayta yuboring.")
         return
@@ -255,7 +259,7 @@ async def process_image(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     data = await state.get_data()
-    survey_id = data['survey_id']
+    survey_id = data.get('survey_id')
     if message.photo:
         photo_id = message.photo[-1].file_id
         async with pool.acquire() as conn:
@@ -271,12 +275,12 @@ async def process_candidate(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     data = await state.get_data()
-    survey_id = data['survey_id']
+    survey_id = data.get('survey_id')
     if message.text == "✅ Tugatish":
         await message.answer("✅ So‘rovnoma yaratildi va faollashtirildi.", reply_markup=admin_keyboard())
         await state.clear()
         return
-    name = message.text.strip()
+    name = (message.text or "").strip()
     if not name:
         await message.answer("Nomzod nomi bo‘sh bo‘lmasin.")
         return
@@ -294,7 +298,7 @@ async def process_channel(message: types.Message, state: FSMContext):
         await message.answer("✅ So‘rovnoma tayyor!", reply_markup=admin_keyboard())
         await state.clear()
         return
-    ch = message.text.strip()
+    ch = (message.text or "").strip()
     if not ch:
         await message.answer("Kanal/guruh nomi bo‘sh bo‘lmasin.")
         return
@@ -314,9 +318,13 @@ async def admin_list_surveys(message: types.Message):
 
     buttons = []
     for s in surveys:
-        default_title = s.get('short_title') or s.get('title') or "So'rovnoma"
+        try:
+            s_map = dict(s)
+        except Exception:
+            s_map = s
+        default_title = s_map.get('short_title') or s_map.get('title') or "So'rovnoma"
         label = short_title(default_title, limit=38)
-        buttons.append([InlineKeyboardButton(text=f"{s['id']}: {label}", callback_data=f"admin_open_{s['id']}")])
+        buttons.append([InlineKeyboardButton(text=f"{s_map.get('id')}: {label}", callback_data=f"admin_open_{s_map.get('id')}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
@@ -330,7 +338,14 @@ async def admin_open_survey_callback(query: types.CallbackQuery):
     if not survey:
         return await query.answer("So‘rovnoma topilmadi.", show_alert=True)
 
-    text = f"🗳 So‘rovnoma: {survey.get('short_title') or survey.get('title')}\nID: {survey_id}\n\n"
+    # safe access
+    try:
+        s_map = dict(survey)
+    except Exception:
+        s_map = survey
+    title_display = s_map.get('short_title') or s_map.get('title') or "So'rovnoma"
+
+    text = f"🗳 So‘rovnoma: {title_display}\nID: {survey_id}\n\n"
     text += "Nomzodlar (tugmalar orqali ko‘rsatiladi):\n"
     for c in candidates:
         text += f"- {c['name']}\n"
@@ -352,7 +367,13 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
         candidates = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
         voters = await conn.fetch("SELECT user_id FROM voted_users WHERE survey_id=$1", survey_id)
 
-    title_for_msg = survey.get('short_title') or "So'rovnoma"
+    # safe title
+    try:
+        s_map = dict(survey) if survey is not None else {}
+    except Exception:
+        s_map = survey or {}
+    title_for_msg = s_map.get('short_title') or s_map.get('description') or "So'rovnoma"
+
     results_text = f"🔔 So‘rovnoma yopildi: {title_for_msg}\n\nNatijalar:\n"
     for c in candidates:
         results_text += f"- {c['name']}: {c['votes']} ovoz\n"
@@ -389,7 +410,11 @@ async def admin_delete_survey_callback(query: types.CallbackQuery):
         survey = await conn.fetchrow("SELECT short_title FROM surveys WHERE id=$1", survey_id)
         if not survey:
             return await query.answer("So‘rovnoma topilmadi yoki allaqachon o‘chirib yuborilgan.", show_alert=True)
-        title = survey.get('short_title') or "So'rovnoma"
+        try:
+            s_map = dict(survey)
+        except Exception:
+            s_map = survey
+        title = s_map.get('short_title') or "So'rovnoma"
         await conn.execute("DELETE FROM surveys WHERE id=$1", survey_id)
 
     await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
@@ -483,11 +508,15 @@ async def open_survey_callback(query: types.CallbackQuery):
         return
 
     # Show image (if any) and description under it; do NOT include candidate names in text
-    caption = survey.get('description') or survey.get('title') or survey.get('short_title') or "So'rovnoma"
+    try:
+        s_map = dict(survey)
+    except Exception:
+        s_map = survey
+    caption = s_map.get('description') or s_map.get('title') or s_map.get('short_title') or "So'rovnoma"
     kb = candidates_keyboard(candidates)
-    if survey.get('image'):
+    if s_map.get('image'):
         try:
-            await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+            await query.message.answer_photo(s_map.get('image'), caption=caption, reply_markup=kb)
         except Exception:
             await query.message.answer(caption, reply_markup=kb)
     else:
@@ -548,10 +577,14 @@ async def recheck_callback(query: types.CallbackQuery):
         await query.answer(text, show_alert=True)
         return
     kb = candidates_keyboard(candidates)
-    caption = survey.get('description') or survey.get('short_title') or "So'rovnoma"
-    if survey and survey.get('image'):
+    try:
+        s_map = dict(survey)
+    except Exception:
+        s_map = survey
+    caption = s_map.get('description') or s_map.get('short_title') or "So'rovnoma"
+    if s_map and s_map.get('image'):
         try:
-            await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+            await query.message.answer_photo(s_map.get('image'), caption=caption, reply_markup=kb)
         except Exception:
             await query.message.answer(caption, reply_markup=kb)
     else:
