@@ -14,9 +14,7 @@ from aiogram.types import (
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
-# Load .env
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TOKEN")
@@ -24,16 +22,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not TOKEN:
-    logging.error("TOKEN muhit o'zgaruvchisi topilmadi. Iltimos TOKEN ni o'rnating.")
-    raise SystemExit("TOKEN muhit o'zgaruvchisi topilmadi. Iltimos TOKEN ni o'rnating.")
+    logging.error("TOKEN muhit o'zgaruvchisi topilmadi.")
+    raise SystemExit("TOKEN muhit o'zgaruvchisi topilmadi.")
 if not DATABASE_URL:
-    logging.error("DATABASE_URL topilmadi. Iltimos DATABASE_URL ni o'rnating.")
-    raise SystemExit("DATABASE_URL topilmadi. Iltimos DATABASE_URL ni o'rnating.")
+    logging.error("DATABASE_URL topilmadi.")
+    raise SystemExit("DATABASE_URL topilmadi.")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ====================== DATABASE ======================
+# ===== DB setup =====
 pool: asyncpg.pool.Pool = None
 
 async def setup_db():
@@ -71,7 +69,7 @@ async def setup_db():
         );
         """)
 
-# ====================== FSM ======================
+# ===== FSM =====
 class CreateSurvey(StatesGroup):
     waiting_for_title = State()
     waiting_for_image = State()
@@ -81,13 +79,13 @@ class CreateSurvey(StatesGroup):
 class Broadcast(StatesGroup):
     waiting_for_message = State()
 
-# ====================== KEYBOARDS ======================
+# ===== Keyboards =====
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ So‘rovnoma yaratish")],
-            [KeyboardButton(text="📋 Obunachilar"), KeyboardButton(text="✉️ Xabar yuborish")],
-            [KeyboardButton(text="📢 Kanal qo‘shish")]
+            [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish"), KeyboardButton(text="📋 Obunachilar")],
+            [KeyboardButton(text="✉️ Xabar yuborish"), KeyboardButton(text="📢 Kanal qo‘shish")]
         ],
         resize_keyboard=True
     )
@@ -105,7 +103,7 @@ def candidates_keyboard_premium(candidates):
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"vote_{c['id']}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ====================== HELPERS ======================
+# ===== Helpers =====
 def normalize_channel(value: str) -> str:
     v = value.strip()
     if v.startswith("https://t.me/"):
@@ -168,10 +166,9 @@ async def is_member(bot: Bot, user_id: int, channel_raw: str) -> bool:
     except Exception:
         return False
 
-# ====================== USER REGISTRATION ON START ======================
+# ===== User registration on /start =====
 @dp.message(F.text == "/start")
 async def start_handler(message: types.Message):
-    # Save user to users table (upsert)
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = (message.from_user.full_name or "").strip()
@@ -191,7 +188,170 @@ async def start_handler(message: types.Message):
     buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
     await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ====================== ADMIN: Obunachilar (subscribers) ======================
+# ===== Admin: create survey =====
+@dp.message(F.text == "➕ So‘rovnoma yaratish")
+async def admin_create_survey(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("📝 So‘rovnoma nomini yuboring:")
+    await state.set_state(CreateSurvey.waiting_for_title)
+
+@dp.message(CreateSurvey.waiting_for_title)
+async def process_title(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    title = message.text.strip()
+    if not title:
+        await message.answer("Nom bo‘sh bo‘lmasin. Qayta yuboring.")
+        return
+    async with pool.acquire() as conn:
+        survey = await conn.fetchrow("INSERT INTO surveys (title) VALUES ($1) RETURNING id", title)
+    await state.update_data(survey_id=survey['id'])
+    await message.answer("📷 Rasm yuboring yoki '✅ Tugatish' tugmasini bosing", reply_markup=finish_keyboard())
+    await state.set_state(CreateSurvey.waiting_for_image)
+
+@dp.message(CreateSurvey.waiting_for_image)
+async def process_image(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE surveys SET image=$1 WHERE id=$2", photo_id, survey_id)
+        await message.answer("✅ Rasm qo‘shildi.")
+    elif message.text == "✅ Tugatish":
+        await message.answer("✍ Nomzod nomini yuboring:", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_candidate)
+
+@dp.message(CreateSurvey.waiting_for_candidate)
+async def process_candidate(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.text == "✅ Tugatish":
+        await message.answer("📢 Kanal/guruh nomini yuboring (@kanal, https://t.me/kanal yoki -100id):", reply_markup=finish_keyboard())
+        await state.set_state(CreateSurvey.waiting_for_channel)
+    else:
+        name = message.text.strip()
+        if not name:
+            await message.answer("Nomzod nomi bo‘sh bo‘lmasin.")
+            return
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO candidates (survey_id, name) VALUES ($1, $2)", survey_id, name)
+        await message.answer(f"✅ Nomzod qo‘shildi: {name}")
+
+@dp.message(CreateSurvey.waiting_for_channel)
+async def process_channel(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    survey_id = data['survey_id']
+    if message.text == "✅ Tugatish":
+        await message.answer("✅ So‘rovnoma tayyor!", reply_markup=admin_keyboard())
+        await state.clear()
+    else:
+        ch = message.text.strip()
+        if not ch:
+            await message.answer("Kanal/guruh nomi bo‘sh bo‘lmasin.")
+            return
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, ch)
+        await message.answer(f"✅ Qo‘shildi: {ch}")
+
+# ===== Admin: list surveys (inline) =====
+@dp.message(F.text == "📋 So‘rovnomalarni ko‘rish")
+async def admin_list_surveys(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    surveys = await get_surveys()
+    if not surveys:
+        await message.answer("❌ Aktiv so‘rovnoma yo‘q.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{s['id']}: {s['title']}", callback_data=f"admin_open_{s['id']}")]
+        for s in surveys
+    ])
+    await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
+
+# ===== Admin: open selected survey (shows Stop) =====
+@dp.callback_query(F.data.startswith("admin_open_"))
+async def admin_open_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("admin_open_", ""))
+    survey, candidates, channels = await get_survey(survey_id)
+    if not survey:
+        return await query.answer("So‘rovnoma topilmadi.", show_alert=True)
+
+    text = f"🗳 So‘rovnoma: {survey['title']}\nID: {survey_id}\n\nNomzodlar:\n"
+    for c in candidates:
+        text += f"- {c['name']} : {c['votes']} ovoz\n"
+    if channels:
+        text += "\nTalab kanallar:\n" + "\n".join([f"- {r['channel']}" for r in channels])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏹ Stop so‘rovnoma", callback_data=f"stop_{survey_id}")]
+    ])
+    await query.message.answer(text, reply_markup=kb)
+    await query.answer()
+
+# ===== Admin: stop =====
+@dp.callback_query(F.data.startswith("stop_"))
+async def admin_stop_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("stop_", ""))
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE surveys SET active=false WHERE id=$1", survey_id)
+        survey = await conn.fetchrow("SELECT title FROM surveys WHERE id=$1", survey_id)
+        candidates = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
+        voters = await conn.fetch("SELECT user_id FROM voted_users WHERE survey_id=$1", survey_id)
+
+    results_text = f"🔔 So‘rovnoma yopildi: {survey['title']}\n\nNatijalar:\n"
+    for c in candidates:
+        results_text += f"- {c['name']}: {c['votes']} ovoz\n"
+
+    sent = 0
+    failed = 0
+    for row in voters:
+        user_id = row['user_id']
+        try:
+            await bot.send_message(user_id, results_text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+            logging.exception(f"Xabar yuborishda xato: user_id={user_id}")
+
+    delete_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Delete so‘rovnoma (butunlay o‘chirish)", callback_data=f"delete_{survey_id}")]
+    ])
+    await query.message.answer(
+        f"So‘rovnoma '{survey['title']}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
+        reply_markup=delete_kb
+    )
+    await query.answer("So‘rovnoma yopildi va qatnashganlarga xabar yuborildi.")
+
+# ===== Admin: delete =====
+@dp.callback_query(F.data.startswith("delete_"))
+async def admin_delete_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("delete_", ""))
+    async with pool.acquire() as conn:
+        survey = await conn.fetchrow("SELECT title FROM surveys WHERE id=$1", survey_id)
+        if not survey:
+            return await query.answer("So‘rovnoma topilmadi yoki allaqachon o‘chirib yuborilgan.", show_alert=True)
+        title = survey['title']
+        await conn.execute("DELETE FROM surveys WHERE id=$1", survey_id)
+
+    await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
+    await query.answer("So‘rovnoma o‘chirildi.")
+
+# ===== Subscribers list =====
 @dp.message(F.text == "📋 Obunachilar")
 async def admin_subscribers(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -201,10 +361,8 @@ async def admin_subscribers(message: types.Message):
     if not rows:
         await message.answer("Hozircha botga a'zo foydalanuvchi yo'q.")
         return
-    # Show count and first 100 users (soddalashtirilgan)
     total = len(rows)
     text = f"👥 Botga a'zo foydalanuvchilar: {total}\n\n"
-    # Limit output to 100 lines to avoid huge messages
     for r in rows[:100]:
         uname = f"@{r['username']}" if r['username'] else ""
         name = r['full_name'] or ""
@@ -213,7 +371,7 @@ async def admin_subscribers(message: types.Message):
         text += f"\n... va yana {total-100} ta foydalanuvchi."
     await message.answer(text)
 
-# ====================== ADMIN: Broadcast (Xabar yuborish) ======================
+# ===== Broadcast =====
 @dp.message(F.text == "✉️ Xabar yuborish")
 async def admin_broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -225,20 +383,15 @@ async def admin_broadcast_start(message: types.Message, state: FSMContext):
 async def admin_broadcast_receive(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
-    # Gather recipients
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id FROM users")
     if not rows:
         await message.answer("Botga a'zo foydalanuvchi topilmadi.")
         await state.clear()
         return
-
     user_ids = [r['id'] for r in rows]
     sent = 0
     failed = 0
-
-    # Prepare content: support text, photo, document
-    # Text
     if message.text:
         content_type = "text"
         text = message.text
@@ -251,12 +404,10 @@ async def admin_broadcast_receive(message: types.Message, state: FSMContext):
         doc = message.document.file_id
         caption = message.caption or ""
     else:
-        await message.answer("Qo'llab-quvvatlanmaydigan turdagi xabar. Iltimos matn, rasm yoki fayl yuboring.")
+        await message.answer("Qo'llab-quvvatlanmaydigan turdagi xabar.")
         await state.clear()
         return
-
     await message.answer(f"Xabar {len(user_ids)} ta foydalanuvchiga yuborilmoqda. Iltimos kuting...")
-
     for uid in user_ids:
         try:
             if content_type == "text":
@@ -266,12 +417,11 @@ async def admin_broadcast_receive(message: types.Message, state: FSMContext):
             elif content_type == "document":
                 await bot.send_document(uid, doc, caption=caption)
             sent += 1
-            await asyncio.sleep(0.05)  # rate limit pause
+            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
             logging.exception(f"Broadcast yuborishda xato: user_id={uid}")
             await asyncio.sleep(0.05)
-
     await message.answer(f"Xabar yuborildi. Muvaffaqiyatli: {sent}; muvaffaqiyatsiz: {failed}.")
     await state.clear()
 
@@ -280,12 +430,83 @@ async def cancel_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Amal bekor qilindi.")
 
-# ====================== (qolgan admin va user handlerlar: survey yaratish, vote, recheck, stop, delete) ======================
-# ... (bu yerda avvalgi survey, vote, recheck, admin stop/delete va boshqa handlerlar bo'lishi kerak)
-# Agar siz hozirgi faylingizda ular mavjud bo'lsa, yuqoridagi yangi funksiyalarni shu faylga qo'shing.
-# Agar kerak bo'lsa, men butun faylni to'liq yangilab yuboraman (sizning oxirgi versiyangizga moslab).
+# ===== User voting handlers (open, vote, recheck) =====
+@dp.callback_query(F.data.startswith("open_"))
+async def open_survey_callback(query: types.CallbackQuery):
+    survey_id = int(query.data.replace("open_", ""))
+    survey, candidates, channels = await get_survey(survey_id)
+    caption = f"🌟 PREMIUM KO'RINISH: {survey['title']}\n\nSizga boyroq ko‘rinish taqdim etildi."
+    if channels:
+        caption += "\n\nTalab kanallar/guruhlar:\n" + "\n".join([f"- {row['channel']}" for row in channels])
+    kb = candidates_keyboard_premium(candidates)
+    if survey and survey['image']:
+        await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+    else:
+        await query.message.answer(caption, reply_markup=kb)
 
-# ====================== RUN ======================
+@dp.callback_query(F.data.startswith("vote_"))
+async def vote_callback(query: types.CallbackQuery):
+    candidate_id = int(query.data.replace("vote_", ""))
+    async with pool.acquire() as conn:
+        cand = await conn.fetchrow("SELECT id, survey_id, name FROM candidates WHERE id=$1", candidate_id)
+    if not cand:
+        await query.answer("Nomzod topilmadi.", show_alert=True)
+        return
+    survey_id = cand['survey_id']
+    if await user_has_voted(survey_id, query.from_user.id):
+        await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
+        return
+    _, _, channels = await get_survey(survey_id)
+    not_joined = []
+    for row in channels:
+        ch_raw = row['channel']
+        ok = await is_member(bot, query.from_user.id, ch_raw)
+        if not ok:
+            not_joined.append(ch_raw)
+    if not_joined:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[join_button_for(ch)] for ch in not_joined] +
+                            [[InlineKeyboardButton(text="🔄 Tekshirish", callback_data=f"recheck_{survey_id}")]]
+        )
+        await query.message.answer(
+            "Ovoz berish uchun quyidagi kanal yoki guruhlarga obuna bo‘lish majburiy. Iltimos, obuna bo‘ling va keyin Tekshirish tugmasini bosing.",
+            reply_markup=kb
+        )
+        await query.answer("Avval talab qilingan kanallarga obuna bo‘ling.", show_alert=True)
+        return
+    await add_vote(survey_id, candidate_id, query.from_user.id)
+    _, candidates, _ = await get_survey(survey_id)
+    kb = candidates_keyboard_premium(candidates)
+    try:
+        await query.message.edit_reply_markup(kb)
+    except Exception:
+        await query.message.answer("Yangi natijalar:", reply_markup=kb)
+    await query.answer("✔ Ovoz berildi!")
+
+@dp.callback_query(F.data.startswith("recheck_"))
+async def recheck_callback(query: types.CallbackQuery):
+    survey_id = int(query.data.replace("recheck_", ""))
+    survey, candidates, channels = await get_survey(survey_id)
+    not_joined = []
+    for row in channels:
+        ch_raw = row['channel']
+        ok = await is_member(bot, query.from_user.id, ch_raw)
+        if not ok:
+            not_joined.append(ch_raw)
+    if not_joined:
+        text = "Siz hali ham quyidagi kanal/guruhlarga obuna bo‘lmagansiz:\n" + "\n".join([f"- {c}" for c in not_joined])
+        await query.answer(text, show_alert=True)
+        return
+    kb = candidates_keyboard_premium(candidates)
+    caption = survey['title'] if survey else "So‘rovnoma topilmadi."
+    await query.message.answer("A’zolik tasdiqlandi. Endi ovoz bera olasiz.", reply_markup=None)
+    if survey and survey.get('image'):
+        await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
+    else:
+        await query.message.answer(caption, reply_markup=kb)
+    await query.answer("A’zolik tasdiqlandi. Ovoz berishingiz mumkin.", show_alert=True)
+
+# ===== Run =====
 async def main():
     await setup_db()
     logging.info("Bot ishga tushdi...")
