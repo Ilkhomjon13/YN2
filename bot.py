@@ -1,7 +1,11 @@
+# bot.py
 import logging
 import asyncio
 import os
+from datetime import datetime
+
 import asyncpg
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
@@ -10,11 +14,21 @@ from aiogram.types import (
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
+# Load .env
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+if not TOKEN:
+    logging.error("TOKEN muhit o'zgaruvchisi topilmadi. Iltimos TOKEN ni o'rnating.")
+    raise SystemExit("TOKEN muhit o'zgaruvchisi topilmadi. Iltimos TOKEN ni o'rnating.")
+if not DATABASE_URL:
+    logging.error("DATABASE_URL topilmadi. Iltimos DATABASE_URL ni o'rnating.")
+    raise SystemExit("DATABASE_URL topilmadi. Iltimos DATABASE_URL ni o'rnating.")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -63,10 +77,9 @@ def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="➕ So‘rovnoma yaratish")],
-            [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish")],
-            [KeyboardButton(text="📊 Natijalarni ko‘rish")],
-            [KeyboardButton(text="➕ Nomzod qo‘shish")],
-            [KeyboardButton(text="📢 Kanal qo‘shish")]
+            [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish"), KeyboardButton(text="📊 Natijalarni ko‘rish")],
+            [KeyboardButton(text="➕ Nomzod qo‘shish"), KeyboardButton(text="📢 Kanal qo‘shish")],
+            [KeyboardButton(text="📤 CSV eksport")]
         ],
         resize_keyboard=True
     )
@@ -77,34 +90,32 @@ def finish_keyboard():
         resize_keyboard=True
     )
 
-def candidates_keyboard(candidates):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{c['name']} ⭐ {c['votes']}", callback_data=f"vote_{c['id']}")]
-        for c in candidates
-    ])
+def candidates_keyboard_premium(candidates):
+    buttons = []
+    for c in candidates:
+        label = f"✨ {c['name']} — {c['votes']} ovoz"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"vote_{c['id']}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ====================== HELPERS ======================
 def normalize_channel(value: str) -> str:
     v = value.strip()
     if v.startswith("https://t.me/"):
-        v = v.replace("https://t.me/", "")
-        # t.me/joinchat/ link bo‘lsa, get_chat_member ishlamaydi; bunday holatda faqat linkni ko‘rsatamiz
-        if "/" in v:
-            return value  # link sifatida qaytaramiz
-        return f"@{v}"
+        path = v.replace("https://t.me/", "").strip()
+        if "/" in path:
+            return v
+        return f"@{path}"
     if v.startswith("@"):
         return v
-    # numeric chat id (supergroup/channel)
     return v
 
 def join_button_for(channel: str) -> InlineKeyboardButton:
-    # Agar @handle bo‘lsa t.me link yasaymiz, aks holda berilgan linkni ishlatamiz
-    if channel.startswith("@"):
-        return InlineKeyboardButton(text=f"➕ {channel} ga obuna bo‘ling", url=f"https://t.me/{channel[1:]}")
-    if channel.startswith("https://t.me/"):
-        return InlineKeyboardButton(text="➕ Obuna bo‘ling", url=channel)
-    # numeric id uchun link yo‘q; faqat nomini ko‘rsatamiz
-    return InlineKeyboardButton(text="➕ Kanal/guruhga obuna bo‘ling", url="https://t.me")  # fallback
+    ch = channel.strip()
+    if ch.startswith("@"):
+        return InlineKeyboardButton(text=f"➕ {ch} ga obuna bo‘lish", url=f"https://t.me/{ch[1:]}")
+    if ch.startswith("https://t.me/"):
+        return InlineKeyboardButton(text="➕ Obuna bo‘lish", url=ch)
+    return InlineKeyboardButton(text="➕ Kanal/guruhga obuna bo‘lish", url="https://t.me")
 
 async def get_surveys():
     async with pool.acquire() as conn:
@@ -114,7 +125,6 @@ async def get_survey(survey_id: int):
     async with pool.acquire() as conn:
         survey = await conn.fetchrow("SELECT * FROM surveys WHERE id=$1", survey_id)
         candidates = await conn.fetch("SELECT * FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
-        # id bo'lmasa ham ishlaydi
         channels = await conn.fetch("SELECT channel FROM required_channels WHERE survey_id=$1 ORDER BY channel", survey_id)
         return survey, candidates, channels
 
@@ -129,12 +139,22 @@ async def add_vote(survey_id: int, candidate_id: int, user_id: int):
             await conn.execute("UPDATE candidates SET votes=votes+1 WHERE id=$1", candidate_id)
             await conn.execute("INSERT INTO voted_users (survey_id, user_id) VALUES ($1, $2)", survey_id, user_id)
 
-async def is_member(bot: Bot, user_id: int, channel: str) -> bool:
-    ch = normalize_channel(channel)
-    try:
-        # Agar link bo‘lsa (joinchat), get_chat_member ishlamaydi; bunday holatda tekshira olmaymiz
-        if ch.startswith("https://t.me/") and "/joinchat/" in ch:
+async def is_member(bot: Bot, user_id: int, channel_raw: str) -> bool:
+    ch = channel_raw.strip()
+    if ch.startswith("-100") or (ch.lstrip("-").isdigit() and len(ch) > 3):
+        try:
+            member = await bot.get_chat_member(int(ch), user_id)
+            return member.status in ("member", "administrator", "creator")
+        except Exception:
             return False
+    if ch.startswith("https://t.me/"):
+        path = ch.replace("https://t.me/", "").strip()
+        if "/" in path:
+            return False
+        ch = "@" + path
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    try:
         member = await bot.get_chat_member(ch, user_id)
         return member.status in ("member", "administrator", "creator")
     except Exception:
@@ -146,16 +166,14 @@ async def start_handler(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         await message.answer("👨‍💼 Admin panel:", reply_markup=admin_keyboard())
         return
-
     surveys = await get_surveys()
     if not surveys:
         await message.answer("Hozircha aktiv so‘rovnoma yo‘q.")
         return
-
     buttons = [[InlineKeyboardButton(text=s['title'], callback_data=f"open_{s['id']}")] for s in surveys]
     await message.answer("Aktiv so‘rovnomalar:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ====================== ADMIN PANEL (functional) ======================
+# ====================== ADMIN PANEL HANDLERS ======================
 @dp.message(F.text == "➕ So‘rovnoma yaratish")
 async def admin_create_survey(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -171,10 +189,12 @@ async def admin_list_surveys(message: types.Message):
     if not surveys:
         await message.answer("❌ Aktiv so‘rovnoma yo‘q.")
         return
-    text = "📋 So‘rovnomalar:\n"
-    for s in surveys:
-        text += f"- {s['id']}: {s['title']}\n"
-    await message.answer(text)
+    # Admin inline list: har birini tanlash mumkin
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{s['id']}: {s['title']}", callback_data=f"admin_open_{s['id']}")]
+        for s in surveys
+    ])
+    await message.answer("Admin: so‘rovnomani tanlang:", reply_markup=kb)
 
 @dp.message(F.text == "📊 Natijalarni ko‘rish")
 async def admin_results(message: types.Message):
@@ -204,6 +224,26 @@ async def admin_add_channel(message: types.Message, state: FSMContext):
         return
     await message.answer("✍ Kanal/guruh nomini yuboring (@kanal, https://t.me/kanal yoki -100id):", reply_markup=finish_keyboard())
     await state.set_state(CreateSurvey.waiting_for_channel)
+
+@dp.message(F.text == "📤 CSV eksport")
+async def admin_export_csv(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    surveys = await get_surveys()
+    if not surveys:
+        await message.answer("Aktiv so‘rovnoma yo‘q.")
+        return
+    s = surveys[0]
+    _, candidates, _ = await get_survey(s['id'])
+    import csv
+    from io import StringIO
+    buf = StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Candidate", "Votes"])
+    for c in candidates:
+        w.writerow([c['name'], c['votes']])
+    buf.seek(0)
+    await message.answer_document(types.InputFile.from_buffer(buf.getvalue().encode(), filename=f"survey_{s['id']}_results.csv"))
 
 # ====================== FSM HANDLERS ======================
 @dp.message(CreateSurvey.waiting_for_title)
@@ -271,17 +311,15 @@ async def process_channel(message: types.Message, state: FSMContext):
             await conn.execute("INSERT INTO required_channels (survey_id, channel) VALUES ($1, $2)", survey_id, ch)
         await message.answer(f"✅ Qo‘shildi: {ch}")
 
-# ====================== USER VOTING ======================
+# ====================== USER VOTING (premium UI for all) ======================
 @dp.callback_query(F.data.startswith("open_"))
 async def open_survey_callback(query: types.CallbackQuery):
     survey_id = int(query.data.replace("open_", ""))
     survey, candidates, channels = await get_survey(survey_id)
-    kb = candidates_keyboard(candidates)
-
-    caption = survey['title'] if survey else "So‘rovnoma topilmadi."
+    caption = f"🌟 PREMIUM KO'RINISH: {survey['title']}\n\nSizga boyroq ko‘rinish taqdim etildi."
     if channels:
         caption += "\n\nTalab kanallar/guruhlar:\n" + "\n".join([f"- {row['channel']}" for row in channels])
-
+    kb = candidates_keyboard_premium(candidates)
     if survey and survey['image']:
         await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
     else:
@@ -301,32 +339,29 @@ async def vote_callback(query: types.CallbackQuery):
         await query.answer("❗ Siz allaqachon ovoz berdingiz!", show_alert=True)
         return
 
-    # A’zolik tekshiruvi
     _, _, channels = await get_survey(survey_id)
     not_joined = []
     for row in channels:
-        ch = normalize_channel(row['channel'])
-        ok = await is_member(bot, query.from_user.id, ch)
+        ch_raw = row['channel']
+        ok = await is_member(bot, query.from_user.id, ch_raw)
         if not ok:
-            not_joined.append(ch)
+            not_joined.append(ch_raw)
 
     if not_joined:
-        # Ogohlantirish va join tugmalari
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[join_button_for(ch)] for ch in not_joined] + 
+            inline_keyboard=[[join_button_for(ch)] for ch in not_joined] +
                             [[InlineKeyboardButton(text="🔄 Tekshirish", callback_data=f"recheck_{survey_id}")]]
         )
         await query.message.answer(
-            "Ovoz berish uchun quyidagi kanal/guruhlarga obuna bo‘lish majburiy:",
+            "Ovoz berish uchun quyidagi kanal yoki guruhlarga obuna bo‘lish majburiy. Iltimos, obuna bo‘ling va keyin Tekshirish tugmasini bosing.",
             reply_markup=kb
         )
-        await query.answer("Avval obuna bo‘ling, keyin ovoz bering.", show_alert=True)
+        await query.answer("Avval talab qilingan kanallarga obuna bo‘ling.", show_alert=True)
         return
 
-    # Ovoz berish
     await add_vote(survey_id, candidate_id, query.from_user.id)
     _, candidates, _ = await get_survey(survey_id)
-    kb = candidates_keyboard(candidates)
+    kb = candidates_keyboard_premium(candidates)
 
     try:
         await query.message.edit_reply_markup(kb)
@@ -338,18 +373,105 @@ async def vote_callback(query: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("recheck_"))
 async def recheck_callback(query: types.CallbackQuery):
     survey_id = int(query.data.replace("recheck_", ""))
-    _, _, channels = await get_survey(survey_id)
+    survey, candidates, channels = await get_survey(survey_id)
+
     not_joined = []
     for row in channels:
-        ch = normalize_channel(row['channel'])
-        ok = await is_member(bot, query.from_user.id, ch)
+        ch_raw = row['channel']
+        ok = await is_member(bot, query.from_user.id, ch_raw)
         if not ok:
-            not_joined.append(ch)
+            not_joined.append(ch_raw)
 
     if not_joined:
-        await query.answer("Hali ham obuna bo‘lmagansiz. Iltimos, obuna bo‘ling.", show_alert=True)
+        text = "Siz hali ham quyidagi kanal/guruhlarga obuna bo‘lmagansiz:\n" + "\n".join([f"- {c}" for c in not_joined])
+        await query.answer(text, show_alert=True)
+        return
+
+    kb = candidates_keyboard_premium(candidates)
+    caption = survey['title'] if survey else "So‘rovnoma topilmadi."
+    await query.message.answer("A’zolik tasdiqlandi. Endi ovoz bera olasiz.", reply_markup=None)
+    if survey and survey.get('image'):
+        await query.message.answer_photo(survey['image'], caption=caption, reply_markup=kb)
     else:
-        await query.answer("A’zolik tasdiqlandi. Endi ovoz bera olasiz.", show_alert=True)
+        await query.message.answer(caption, reply_markup=kb)
+    await query.answer("A’zolik tasdiqlandi. Ovoz berishingiz mumkin.", show_alert=True)
+
+# ====================== ADMIN: open selected survey, stop, delete ======================
+@dp.callback_query(F.data.startswith("admin_open_"))
+async def admin_open_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("admin_open_", ""))
+    survey, candidates, channels = await get_survey(survey_id)
+    if not survey:
+        return await query.answer("So‘rovnoma topilmadi.", show_alert=True)
+
+    text = f"🗳 So‘rovnoma: {survey['title']}\nID: {survey_id}\n\nNomzodlar:\n"
+    for c in candidates:
+        text += f"- {c['name']} : {c['votes']} ovoz\n"
+    if channels:
+        text += "\nTalab kanallar:\n" + "\n".join([f"- {r['channel']}" for r in channels])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏹ Stop so‘rovnoma", callback_data=f"stop_{survey_id}")]
+    ])
+    await query.message.answer(text, reply_markup=kb)
+    await query.answer()
+
+@dp.callback_query(F.data.startswith("stop_"))
+async def admin_stop_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("stop_", ""))
+    # deactivate survey
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE surveys SET active=false WHERE id=$1", survey_id)
+
+    # gather results and voters
+    async with pool.acquire() as conn:
+        survey = await conn.fetchrow("SELECT title FROM surveys WHERE id=$1", survey_id)
+        candidates = await conn.fetch("SELECT name, votes FROM candidates WHERE survey_id=$1 ORDER BY id", survey_id)
+        voters = await conn.fetch("SELECT user_id FROM voted_users WHERE survey_id=$1", survey_id)
+
+    results_text = f"🔔 So‘rovnoma yopildi: {survey['title']}\n\nNatijalar:\n"
+    for c in candidates:
+        results_text += f"- {c['name']}: {c['votes']} ovoz\n"
+
+    sent = 0
+    failed = 0
+    for row in voters:
+        user_id = row['user_id']
+        try:
+            await bot.send_message(user_id, results_text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+            logging.exception(f"Xabar yuborishda xato: user_id={user_id}")
+
+    delete_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Delete so‘rovnoma (butunlay o‘chirish)", callback_data=f"delete_{survey_id}")]
+    ])
+    await query.message.answer(
+        f"So‘rovnoma '{survey['title']}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
+        reply_markup=delete_kb
+    )
+    await query.answer("So‘rovnoma yopildi va qatnashganlarga xabar yuborildi.")
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def admin_delete_survey_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+    survey_id = int(query.data.replace("delete_", ""))
+    async with pool.acquire() as conn:
+        survey = await conn.fetchrow("SELECT title FROM surveys WHERE id=$1", survey_id)
+        if not survey:
+            return await query.answer("So‘rovnoma topilmadi yoki allaqachon o‘chirib yuborilgan.", show_alert=True)
+        title = survey['title']
+        await conn.execute("DELETE FROM surveys WHERE id=$1", survey_id)
+
+    await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
+    await query.answer("So‘rovnoma o‘chirildi.")
 
 # ====================== RUN ======================
 async def main():
