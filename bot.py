@@ -372,8 +372,10 @@ async def admin_stop_survey_callback(query: types.CallbackQuery):
     delete_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Delete so‘rovnoma (butunlay o‘chirish)", callback_data=f"delete_{survey_id}")]
     ])
+
+    # Use title_for_msg to avoid f-string escape issues
     await query.message.answer(
-        f"So‘rovnoma '{survey.get('short_title') or 'So\\'rovnoma'}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
+        f"So‘rovnoma '{title_for_msg}' yopildi.\nXabar yuborildi: {sent}; muvaffaqiyatsiz: {failed}.",
         reply_markup=delete_kb
     )
     await query.answer("So‘rovnoma yopildi va qatnashganlarga xabar yuborildi.")
