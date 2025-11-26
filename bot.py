@@ -33,12 +33,11 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ====================== DATABASE ======================
-pool: asyncpg.pool.Pool = None
 async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     async with pool.acquire() as conn:
-        # create base tables if not exists
+        # 1) Create base tables (minimal schema) if not exists
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
@@ -46,22 +45,30 @@ async def setup_db():
             image TEXT,
             active BOOLEAN DEFAULT TRUE
         );
+        """)
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS candidates (
             id SERIAL PRIMARY KEY,
             survey_id INT REFERENCES surveys(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             votes INT DEFAULT 0
         );
+        """)
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS required_channels (
             id SERIAL PRIMARY KEY,
             survey_id INT REFERENCES surveys(id) ON DELETE CASCADE,
             channel TEXT
         );
+        """)
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS voted_users (
             survey_id INT REFERENCES surveys(id) ON DELETE CASCADE,
             user_id BIGINT,
             PRIMARY KEY(survey_id, user_id)
         );
+        """)
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id BIGINT PRIMARY KEY,
             username TEXT,
@@ -69,15 +76,30 @@ async def setup_db():
             joined_at TIMESTAMP DEFAULT now()
         );
         """)
-        # ensure new columns exist on existing surveys table
-        await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS short_title TEXT;")
-        await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS description TEXT;")
-        # fill short_title for old rows if empty
-        await conn.execute("""
-            UPDATE surveys
-            SET short_title = LEFT(COALESCE(short_title, title, ''), 38)
-            WHERE short_title IS NULL OR short_title = '';
-        """)
+
+        # 2) Ensure new columns exist (ALTER TABLE). Run each ALTER separately and log errors.
+        try:
+            await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS short_title TEXT;")
+            logging.info("ALTER: short_title ensured.")
+        except Exception as e:
+            logging.exception("ALTER short_title failed: %s", e)
+
+        try:
+            await conn.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS description TEXT;")
+            logging.info("ALTER: description ensured.")
+        except Exception as e:
+            logging.exception("ALTER description failed: %s", e)
+
+        # 3) Fill short_title for existing rows if empty
+        try:
+            await conn.execute("""
+                UPDATE surveys
+                SET short_title = LEFT(COALESCE(short_title, title, ''), 38)
+                WHERE short_title IS NULL OR short_title = '';
+            """)
+            logging.info("Existing surveys short_title populated where needed.")
+        except Exception as e:
+            logging.exception("UPDATE short_title failed: %s", e)
 
 # ====================== FSM ======================
 class CreateSurvey(StatesGroup):
