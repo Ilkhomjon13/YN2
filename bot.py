@@ -104,7 +104,19 @@ def finish_keyboard():
 def candidates_keyboard(candidates):
     buttons = []
     for c in candidates:
-        buttons.append([InlineKeyboardButton(text=f"{c['name']}", callback_data=f"vote_{c['id']}")])
+        name = c["name"]
+        votes = c["votes"]
+
+        # Premium ko‘rinish: ⭐ Nomi — ⭐ ovoz
+        label = f"⭐ {name} — ⭐ {votes} ovoz"
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"vote_{c['id']}"
+            )
+        ])
+
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def short_title(title: str, limit: int = 38) -> str:
