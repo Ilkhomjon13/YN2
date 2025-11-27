@@ -123,7 +123,7 @@ def candidates_keyboard(candidates):
         votes = c["votes"]
 
         # Premium ko‘rinish: ⭐ Nomi — ⭐ ovoz
-        label = f"⭐ {name} — ⭐ {votes} ovoz"
+        label = f"⭐ {name} — ⭐ {votes} "
 
         buttons.append([
             InlineKeyboardButton(
