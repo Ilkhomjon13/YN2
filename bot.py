@@ -230,25 +230,24 @@ async def start_handler(message: types.Message):
 
     buttons = []
     for s in surveys:
-        # asyncpg.Record supports mapping access; use get via dict conversion for safety
-        try:
-            s_map = dict(s)
-        except Exception:
-            s_map = s
+        s_map = dict(s)
         default_title = s_map.get('short_title') or s_map.get('title') or "So'rovnoma"
         label = short_title(default_title, limit=38)
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s_map.get('id')}")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    # **Start screen from DB**
     async with pool.acquire() as conn:
         scr = await conn.fetchrow("SELECT photo, caption FROM start_screen WHERE id=1")
 
-photo = scr["photo"] if scr else None
-caption = scr["caption"] if scr and scr["caption"] else "Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:"
+    photo = scr["photo"] if scr else None
+    caption = scr["caption"] if scr and scr["caption"] else "Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:"
 
-if photo:
-    await message.answer_photo(photo, caption=caption, reply_markup=kb)
-else:
-    await message.answer(caption, reply_markup=kb)
+    if photo:
+        await message.answer_photo(photo, caption=caption, reply_markup=kb)
+    else:
+        await message.answer(caption, reply_markup=kb)
 
     # ====================== ADMIN: FOYDALANUVCHI OYNASI ======================
 @dp.message(F.text == "🖼 Foydalanuvchi oynasi")
