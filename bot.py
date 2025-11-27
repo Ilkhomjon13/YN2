@@ -72,7 +72,12 @@ async def setup_db():
             joined_at TIMESTAMP DEFAULT now()
         );
         """)
-
+        CREATE TABLE IF NOT EXISTS start_screen (
+    id SERIAL PRIMARY KEY,
+    photo TEXT,
+    caption TEXT
+);
+""")
 # ====================== FSM ======================
 class CreateSurvey(StatesGroup):
     waiting_for_short_title = State()
@@ -84,11 +89,15 @@ class CreateSurvey(StatesGroup):
 class Broadcast(StatesGroup):
     waiting_for_message = State()
 
+class StartScreen(StatesGroup):
+    waiting_for_photo = State()
+    waiting_for_caption = State()
+
 # ====================== HELPERS & KEYBOARDS ======================
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ So‘rovnoma yaratish")],
+            [KeyboardButton(text="➕ So‘rovnoma yaratish"), KeyboardButton(text="🖼 Foydalanuvchi oynasi")]
             [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish"), KeyboardButton(text="📋 Obunachilar")],
             [KeyboardButton(text="✉️ Xabar yuborish"), KeyboardButton(text="📢 Kanal qo‘shish")]
         ],
@@ -224,8 +233,52 @@ async def start_handler(message: types.Message):
         label = short_title(default_title, limit=38)
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s_map.get('id')}")])
 
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:", reply_markup=kb)
+    async with pool.acquire() as conn:
+    scr = await conn.fetchrow("SELECT photo, caption FROM start_screen WHERE id=1")
+
+photo = scr["photo"] if scr else None
+caption = scr["caption"] if scr and scr["caption"] else "Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:"
+
+if photo:
+    await message.answer_photo(photo, caption=caption, reply_markup=kb)
+else:
+    await message.answer(caption, reply_markup=kb)
+
+    # ====================== ADMIN: FOYDALANUVCHI OYNASI ======================
+@dp.message(F.text == "🖼 Foydalanuvchi oynasi")
+async def start_screen_edit(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("📸 Foydalanuvchi oynasi uchun rasm yuboring:")
+    await state.set_state(StartScreen.waiting_for_photo)
+
+@dp.message(StartScreen.waiting_for_photo)
+async def get_start_screen_photo(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if not message.photo:
+        await message.answer("❗ Iltimos rasm yuboring!")
+        return
+    photo_id = message.photo[-1].file_id
+    await state.update_data(photo=photo_id)
+    await message.answer("✍ Endi rasm ostidagi matnni yuboring:")
+    await state.set_state(StartScreen.waiting_for_caption)
+
+@dp.message(StartScreen.waiting_for_caption)
+async def get_start_screen_caption(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    caption = (message.text or "").strip()
+    data = await state.get_data()
+    photo = data.get("photo")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE start_screen
+            SET photo=$1, caption=$2
+            WHERE id=1
+        """, photo, caption)
+    await state.clear()
+    await message.answer("✅ Foydalanuvchi oynasi saqlandi!")
 
 # ====================== ADMIN: CREATE SURVEY ======================
 @dp.message(F.text == "➕ So‘rovnoma yaratish")
