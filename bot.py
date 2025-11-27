@@ -240,7 +240,7 @@ async def start_handler(message: types.Message):
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"open_{s_map.get('id')}")])
 
     async with pool.acquire() as conn:
-    scr = await conn.fetchrow("SELECT photo, caption FROM start_screen WHERE id=1")
+        scr = await conn.fetchrow("SELECT photo, caption FROM start_screen WHERE id=1")
 
 photo = scr["photo"] if scr else None
 caption = scr["caption"] if scr and scr["caption"] else "Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:"
