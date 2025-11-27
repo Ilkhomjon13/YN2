@@ -103,7 +103,7 @@ class StartScreen(StatesGroup):
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ So‘rovnoma yaratish"), KeyboardButton(text="🖼 Foydalanuvchi oynasi")]
+            [KeyboardButton(text="➕ So‘rovnoma yaratish"), KeyboardButton(text="🖼 Foydalanuvchi oynasi")],
             [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish"), KeyboardButton(text="📋 Obunachilar")],
             [KeyboardButton(text="✉️ Xabar yuborish"), KeyboardButton(text="📢 Kanal qo‘shish")]
         ],
