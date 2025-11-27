@@ -39,7 +39,7 @@ async def setup_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     async with pool.acquire() as conn:
-        # Ensure columns exist; safe even if they already exist
+        # Jadval va ustunlarni yaratish
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS surveys (
             id SERIAL PRIMARY KEY,
@@ -71,13 +71,19 @@ async def setup_db():
             full_name TEXT,
             joined_at TIMESTAMP DEFAULT now()
         );
-        """)
         CREATE TABLE IF NOT EXISTS start_screen (
-    id SERIAL PRIMARY KEY,
-    photo TEXT,
-    caption TEXT
-);
-""")
+            id SERIAL PRIMARY KEY,
+            photo TEXT,
+            caption TEXT
+        );
+        """)
+
+        # Dastlabki start_screen yozuvini qo'shish (agar yo'q bo'lsa)
+        await conn.execute("""
+        INSERT INTO start_screen (id, photo, caption)
+        VALUES (1, '', 'Aktiv so‘rovnomalar. Tugmani bosing va batafsil ko‘ring:')
+        ON CONFLICT (id) DO NOTHING
+        """)
 # ====================== FSM ======================
 class CreateSurvey(StatesGroup):
     waiting_for_short_title = State()
