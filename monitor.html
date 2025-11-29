@@ -1,27 +1,71 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<title>Live Monitoring</title>
+    <meta charset="UTF-8">
+    <title>Live Monitoring</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body {
+            font-family: Arial;
+            background: #f4f4f4;
+            padding: 20px;
+            text-align: center;
+        }
+        canvas {
+            width: 90% !important;
+            max-width: 700px;
+            margin-top: 30px;
+        }
+    </style>
 </head>
 <body>
-<h1>Live Monitoring</h1>
-<ul id="results"></ul>
+
+<h2>📊 Live Monitoring</h2>
+<h3>Survey ID: {{ survey_id }}</h3>
+
+<canvas id="chart"></canvas>
 
 <script>
-const survey_id = SURVEY_ID_PLACEHOLDER; // bot.py orqali linkda keladi
-const ws = new WebSocket(`ws://localhost:8000/ws/${survey_id}`);
+    let survey_id = "{{ survey_id }}";
+    let ws = new WebSocket(`wss://${location.host}/ws/${survey_id}`);
 
-ws.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    const ul = document.getElementById("results");
-    ul.innerHTML = "";
-    data.forEach(c => {
-        const li = document.createElement("li");
-        li.textContent = `${c.name}: ${c.votes} ovoz`;
-        ul.appendChild(li);
+    let ctx = document.getElementById('chart').getContext('2d');
+    let chart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Votes',
+                data: [],
+                backgroundColor: '#4e73df',
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                y: { beginAtZero: true }
+            }
+        }
     });
-};
+
+    ws.onmessage = (event) => {
+        let msg = JSON.parse(event.data);
+        if (msg.type === "update") {
+            let labels = [];
+            let values = [];
+            msg.data.forEach(row => {
+                labels.push(row.name);
+                values.push(row.votes);
+            });
+
+            chart.data.labels = labels;
+            chart.data.datasets[0].data = values;
+            chart.update();
+        }
+    };
 </script>
+
 </body>
 </html>
