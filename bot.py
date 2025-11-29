@@ -105,7 +105,8 @@ def admin_keyboard():
         keyboard=[
             [KeyboardButton(text="➕ So‘rovnoma yaratish"), KeyboardButton(text="🖼 Foydalanuvchi oynasi")],
             [KeyboardButton(text="📋 So‘rovnomalarni ko‘rish"), KeyboardButton(text="📋 Obunachilar")],
-            [KeyboardButton(text="✉️ Xabar yuborish"), KeyboardButton(text="📢 Kanal qo‘shish")]
+            [KeyboardButton(text="✉️ Xabar yuborish"), KeyboardButton(text="📢 Kanal qo‘shish")],
+            [KeyboardButton(text="📡 Live monitoring")]   # <<–– YANGI QATOR
         ],
         resize_keyboard=True
     )
@@ -499,6 +500,30 @@ async def admin_delete_survey_callback(query: types.CallbackQuery):
     await query.message.answer(f"✅ So‘rovnoma '{title}' (ID: {survey_id}) butunlay o‘chirildi.")
     await query.answer("So‘rovnoma o‘chirildi.")
 
+# ====================== 📡 Live monitoring ======================
+@dp.message(F.text == "📡 Live monitoring")
+async def admin_live_monitoring(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    surveys = await get_surveys()
+    if not surveys:
+        return await message.answer("❗ Aktiv so‘rovnomalar yo‘q.")
+
+    buttons = []
+    for s in surveys:
+        s_map = dict(s)
+        label = short_title(s_map.get("short_title") or "So‘rovnoma")
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"monitor_{s_map['id']}"
+            )
+        ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("📡 Live monitoring uchun so‘rovnomani tanlang:", reply_markup=kb)
+
 # ====================== SUBSCRIBERS & BROADCAST ======================
 @dp.message(F.text == "📋 Obunachilar")
 async def admin_subscribers(message: types.Message):
@@ -576,6 +601,24 @@ async def admin_broadcast_receive(message: types.Message, state: FSMContext):
 async def cancel_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Amal bekor qilindi.")
+# ====================== monitoring linki yuboramiz ====================== 
+@dp.callback_query(F.data.startswith("monitor_"))
+async def monitor_open_callback(query: types.CallbackQuery):
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Ruxsat yo‘q.", show_alert=True)
+
+    survey_id = int(query.data.replace("monitor_", ""))
+
+    # Sizning monitoring saytingiz URL manzili
+    base_url = os.getenv("MONITOR_BASE_URL", "https://yourdomain.com")
+
+    link = f"{base_url}/monitor?survey_id={survey_id}"
+
+    await query.message.answer(
+        f"🌐 Live Monitoring link:\n\n{link}\n\n"
+        "Ushbu linkni brauzerda oching. Grafiklar real vaqtda yangilanadi."
+    )
+    await query.answer()
 
 # ====================== USER VOTING HANDLERS ======================
 @dp.callback_query(F.data.startswith("open_"))
