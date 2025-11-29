@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Monitoring</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body style="font-family:Arial">
+<h2>📡 Live Monitoring</h2>
+<canvas id="chart" width="400" height="200"></canvas>
+
+<script>
+let urlParams = new URLSearchParams(window.location.search);
+let survey_id = urlParams.get("survey_id");
+
+let ws = new WebSocket("wss://yourdomain.com/ws?survey_id=" + survey_id);
+
+let ctx = document.getElementById("chart").getContext("2d");
+let chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'Ovozlar',
+            backgroundColor: '#3498db',
+            data: []
+        }]
+    }
+});
+
+ws.onmessage = event => {
+    let data = JSON.parse(event.data);
+
+    chart.data.labels = data.map(x => x.name);
+    chart.data.datasets[0].data = data.map(x => x.votes);
+    chart.update();
+};
+</script>
+</body>
+</html>
