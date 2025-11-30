@@ -117,31 +117,19 @@ def finish_keyboard():
         resize_keyboard=True
     )
 
-async def candidates_keyboard(candidates, survey_id, user_id):
-    """
-    Foydalanuvchi ovoz bergan nomzod tugmasida ✔ belgisi chiqadi.
-    """
-    async with pool.acquire() as conn:
-        voted_row = await conn.fetchrow(
-            "SELECT candidate_id FROM voted_users WHERE survey_id=$1 AND user_id=$2",
-            survey_id, user_id
-        )
-
-    voted_candidate = voted_row["candidate_id"] if voted_row else None
-
+def candidates_keyboard(candidates):
     buttons = []
     for c in candidates:
-        cid = c["id"]
         name = c["name"]
         votes = c["votes"]
 
-        mark = "✔ " if cid == voted_candidate else ""
-        label = f"{mark}{name} — {votes}"
+        # Premium ko‘rinish: ⭐ Nomi — ⭐ ovoz
+        label = f"⭐ {name} — ⭐ {votes} "
 
         buttons.append([
             InlineKeyboardButton(
                 text=label,
-                callback_data=f"vote_{cid}"
+                callback_data=f"vote_{c['id']}"
             )
         ])
 
@@ -647,8 +635,7 @@ async def open_survey_callback(query: types.CallbackQuery):
     except Exception:
         s_map = survey
     caption = s_map.get('description') or s_map.get('title') or s_map.get('short_title') or "So'rovnoma"
-    kb = await candidates_keyboard(candidates, survey_id, query.from_user.id)
-    survey_id = s_map.get("id")
+    kb = candidates_keyboard(candidates)
     if s_map.get('image'):
         try:
             await query.message.answer_photo(s_map.get('image'), caption=caption, reply_markup=kb)
@@ -690,7 +677,7 @@ async def vote_callback(query: types.CallbackQuery):
         return
     await add_vote(survey_id, candidate_id, query.from_user.id)
     _, candidates, _ = await get_survey(survey_id)
-    kb = await candidates_keyboard(candidates, survey_id, query.from_user.id)
+    kb = candidates_keyboard(candidates)
     try:
         await query.message.edit_reply_markup(kb)
     except Exception:
